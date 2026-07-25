@@ -1,0 +1,65 @@
+name: Napoleon
+options:
+  bundleIdPrefix: com.napoleon
+  deploymentTarget: { macOS: "14.0" }
+  # i18n：英文是开发语言（源码里的字符串字面量就是英文，同时充当 String Catalog 的 key），
+  # 其余三种语言在 Resources/Localizable.xcstrings 里翻译。
+  developmentLanguage: en
+knownRegions: [en, zh-Hans, zh-Hant, ja]
+settings:
+  base:
+    CODE_SIGN_IDENTITY: "com.ryekee.napoleon"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+  configs:
+    Debug:
+      ENABLE_TESTABILITY: YES
+targets:
+  Napoleon:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/Napoleon
+      - Resources/Assets.xcassets       # App 图标（AppIcon.appiconset）
+      - Resources/Localizable.xcstrings # i18n：en / zh-Hans / zh-Hant / ja
+    dependencies: [{ target: NapoleonCore }]
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: Resources/Info.plist        # 由下方 properties 生成
+      properties:
+        LSUIElement: true
+        CFBundleDevelopmentRegion: en
+        # 版本号显式写在这里（不再吃 XcodeGen 的 1.0/1 默认值）——About 页展示它，
+        # 检查更新拿它跟 GitHub Release 的 tag 比对。发版时改这两行。
+        CFBundleShortVersionString: "0.1.0"   # 面向用户的版本号，对应 Release tag v0.1.0
+        CFBundleVersion: "1"                  # 构建号，每次发布递增
+        NSHumanReadableCopyright: "© 2026 Ryekee"
+    scheme:
+      testTargets: [NapoleonTests]      # 让 `Napoleon` scheme 的 test action 挂上 App 层单测
+  NapoleonCore:
+    type: framework
+    platform: macOS
+    sources: [Sources/NapoleonCore]
+    scheme:
+      testTargets: [NapoleonCoreTests]   # 让 `NapoleonCore` scheme 的 test action 挂上测试
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES     # 无 info.path 时需显式生成，否则 framework 缺 Info.plist 导致签名失败
+  NapoleonCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests/NapoleonCoreTests]
+    dependencies: [{ target: NapoleonCore }]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES     # 同上，测试 bundle 也需要 Info.plist
+  NapoleonTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests/NapoleonTests]
+    dependencies: [{ target: Napoleon }]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES

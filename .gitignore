@@ -1,0 +1,23 @@
+.DS_Store
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+.swiftpm/
+*.xcuserstate
+/Napoleon.app
+.superpowers/
+# 不公开的本地资产与开发过程产物：仍然留在工作区，只是不入库。
+# design   —— 图标设计稿（成品已在 Resources/Assets.xcassets）
+# docs     —— spec/plan/spike 报告、测试矩阵等开发过程文档
+# spikes   —— Phase 0 的技术验证小程序，不参与 App 构建
+# tools    —— 从 design/ 生成资产目录的脚本，没有 design/ 就无用武之地
+/design/
+/docs/
+/spikes/
+/tools/
+
+# Resources 目录里只有 Info.plist 是 XcodeGen 生成的（内容来自 project.yml 的 info.properties），
+# 其余是手写资源（App 图标资产目录、String Catalog）——必须入库，否则新克隆会丢图标和全部翻译。
+/Resources/Info.plist
