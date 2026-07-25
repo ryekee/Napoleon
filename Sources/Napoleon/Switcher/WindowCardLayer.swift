@@ -19,11 +19,17 @@ import QuartzCore
 /// *from* only because the same layer instance survives from the "icon-only" render to the
 /// "thumbnail arrived" render.
 ///
-/// **Geometry**: `isGeometryFlipped = true` on `self` — the card's own direct sublayers
-/// (thumbnail container near the top, title strip below it) are laid out with top-left-origin
-/// math to match `SwitcherView`'s own `isFlipped = true` coordinate system. Without this, the
-/// thumbnail/title vertical order (both positioned via `SwitcherMetrics`, which assumes "y grows
-/// downward") would render upside down relative to what the numbers describe.
+/// **Geometry — read this before moving anything**: the host views (`SwitcherView` and its
+/// `cardHostView`) are `isFlipped = true`, and this layer additionally sets
+/// `isGeometryFlipped = true`. The two flips cancel out, so for the card's own sublayers
+/// **`y` is measured upward from the card's bottom edge: a larger `y` renders higher on
+/// screen.**
+///
+/// That is the opposite of what the numbers below read like at a glance, and it is why the
+/// card renders label-strip-on-top / thumbnail-underneath even though the thumbnail is given
+/// the smaller `y`. The layout was tuned against what is actually on screen and the user
+/// approved that arrangement, so the flip is left as is rather than "fixed" — but any change
+/// to these frames has to be reasoned about bottom-up, and verified visually.
 final class WindowCardLayer: CALayer {
     private let thumbnailContainer = CALayer()
     private let iconLayer = CALayer()
@@ -123,15 +129,20 @@ final class WindowCardLayer: CALayer {
         thumbnailLayer.opacity = 0 // icon shows through until a real thumbnail arrives
         thumbnailContainer.addSublayer(thumbnailLayer)
 
-        // App-icon badge: overlaps the thumbnail's bottom-left corner (~1/4 of it sits outside the
-        // thumbnail, over the card background; ~3/4 overlaps the thumbnail itself) so it reads as
-        // a corner badge rather than a second, disconnected icon. Added as a sibling of
-        // `thumbnailContainer` (not its child) so its drop shadow and the part hanging outside the
-        // thumbnail aren't clipped by `thumbnailContainer.masksToBounds`.
+        // App-icon badge: horizontally centred, straddling the thumbnail's **visually lower**
+        // edge — ~3/4 sits over the thumbnail, ~1/4 hangs below it into the card's bottom
+        // padding. That overlap is what makes it read as a badge belonging to the thumbnail
+        // rather than a second, disconnected icon. Added as a sibling of `thumbnailContainer`
+        // (not its child) so the drop shadow and the overhang aren't clipped by
+        // `thumbnailContainer.masksToBounds`.
+        //
+        // `y` here is measured **upward from the card's bottom** — see the note on the
+        // coordinate system in the type's header doc. Hence the visual bottom of the thumbnail
+        // is at `y == cardPadding`, and subtracting a quarter of the badge drops it below.
         let badgeSize = SwitcherMetrics.badgeSize
         badgeLayer.frame = CGRect(
-            x: SwitcherMetrics.cardPadding - badgeSize * 0.25,
-            y: SwitcherMetrics.cardPadding + cardStyle.thumbnailSize.height - badgeSize * 0.75,
+            x: SwitcherMetrics.cardPadding + (cardStyle.thumbnailSize.width - badgeSize) / 2,
+            y: SwitcherMetrics.cardPadding - badgeSize * 0.25,
             width: badgeSize,
             height: badgeSize
         )
