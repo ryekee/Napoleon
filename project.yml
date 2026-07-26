@@ -34,8 +34,25 @@ targets:
         # 版本号显式写在这里（不再吃 XcodeGen 的 1.0/1 默认值）——About 页展示它，
         # 检查更新拿它跟 GitHub Release 的 tag 比对。发版时改这两行。
         CFBundleShortVersionString: "0.1.0"   # 面向用户的版本号，对应 Release tag v0.1.0
-        CFBundleVersion: "1"                  # 构建号，每次发布递增
+        # CFBundleVersion（构建号）由下面的 postCompileScripts 在每次构建时写成 git 提交数——
+        # 这里的值只是占位，实际产物里不会保留它。
+        CFBundleVersion: "0"
         NSHumanReadableCopyright: "© 2026 Ryekee"
+    # 构建号 = git 提交数。Xcode 不会自动递增构建号，写死在 project.yml 里则永远是同一个数字，
+    # 「我跑的是不是最新构建」就无从判断。用提交数是因为它单调递增、可复现（同一个 commit 永远
+    # 得到同一个构建号）、且不需要往仓库里回写任何东西。
+    #
+    # 改的是 XcodeGen 生成的**源** Info.plist（`Resources/Info.plist`，已 gitignore，不会污染
+    # 仓库），而不是产物里的那份：产物 plist 要到打包阶段才存在，postCompile 时改会报
+    # 「Entry Does Not Exist」；而 postBuild 又在代码签名**之后**，那时改包内容会直接让签名失效。
+    # 放在 preBuild 改源文件，后续的 Process Info.plist 自然带上新值，签名也照常覆盖它。
+    preBuildScripts:
+      - name: Stamp build number from git
+        basedOnDependencyAnalysis: false   # 无输出产物，本来就该每次构建都跑
+        script: |
+          set -e
+          BUILD=$(git -C "$SRCROOT" rev-list --count HEAD 2>/dev/null || echo 0)
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$SRCROOT/Resources/Info.plist"
     scheme:
       testTargets: [NapoleonTests]      # 让 `Napoleon` scheme 的 test action 挂上 App 层单测
   NapoleonCore:
