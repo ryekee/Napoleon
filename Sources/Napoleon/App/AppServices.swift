@@ -107,6 +107,11 @@ final class AppServices {
                 )
             )
         }
+        // 设置窗口开/关会切换 activation policy（`.regular` ↔ `.accessory`），窗口列表因此
+        // 多出或少掉 Napoleon 自己的窗口——而策略变化不发任何系统通知，必须显式刷新一次。
+        settingsWindow.onVisibilityChanged = { [weak self] _ in
+            self?.windowStore.requestRefresh()
+        }
         self.settingsWindow = settingsWindow
 
         menuBar = MenuBarController(

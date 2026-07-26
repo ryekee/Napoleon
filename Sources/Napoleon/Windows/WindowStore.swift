@@ -332,6 +332,17 @@ final class WindowStore {
         return (state, handles, currentSpaceIsFullscreen)
     }
 
+    /// 请求一次全量刷新（debounce 合并，见 `scheduleFullRefresh`）。
+    ///
+    /// 给「窗口集合可能已经变了、但系统不会为此发任何通知」的场景用——目前唯一的调用方是
+    /// Napoleon 自己切换 `NSApplication.activationPolicy`（设置窗口开/关时在 `.regular` 与
+    /// `.accessory` 之间切换，见 `SettingsWindowController`）：枚举只收 `.regular` 的 App，
+    /// 所以这一下切换会让 Napoleon 自己的窗口进入或离开列表，而 `didLaunch`/`didTerminate`
+    /// 都不会因为策略变化而触发。
+    func requestRefresh() {
+        scheduleFullRefresh()
+    }
+
     /// 自愈：丢掉「所属进程已经不在了」的窗口。
     ///
     /// **为什么不能只靠 `didTerminateApplicationNotification`**：真机实测发现有的 App 退出时这个
@@ -906,10 +917,15 @@ final class WindowStore {
     /// 原地更新，不改变窗口集合，不 bump `stateGeneration`（跟 `.focusedWindowChanged` 同样的
     /// 道理，见 `handle(_:)` 头注释）。
     ///
-    /// R1（Minor）：额外排除 Napoleon 自己的 pid——Napoleon 本身的 `activationPolicy` 也是
-    /// `.regular`（普通 App），激活面板/切换窗口这类操作本身会让 Napoleon 短暂成为前台 App，
-    /// 触发系统发出的 `didActivateApplicationNotification`，如果不排除会把 Napoleon 自己的
-    /// 某个窗口（如果它注册了任何标准窗口）当成一次「用户激活」记进 MRU，污染切换历史。
+    /// **不再排除 Napoleon 自己的 pid**。原先排除是出于「切换器自身的操作会让 Napoleon 短暂
+    /// 成为前台、污染 MRU」的顾虑，但当时 Napoleon 根本没有任何标准窗口，那纯属防御性代码；
+    /// 而且浮层是 `.nonactivatingPanel` + `canBecomeKey == false`（见 `OverlayPanel`），
+    /// 全代码库唯一的 `NSApp.activate` 就在设置窗口的 `show()` 里——也就是说，Napoleon 成为
+    /// 前台**当且仅当**用户主动打开了设置窗口。那正是应该记进 MRU 的一次真实激活：设置窗口现在
+    /// 是切换器里可选的普通窗口，切走再 Cmd+Tab 时它理应排在「上一个窗口」的位置。
+    ///
+    /// 平时（`.accessory`）Napoleon 本来就被下面的 `activationPolicy == .regular` 守卫挡掉，
+    /// 不需要额外的 pid 判断。
     ///
     /// **跨 Space MRU 修复：解析优先于反查（不再只用 `reverse`）**。旧版本读到 `focusedRef`
     /// 之后走 `windowID(for:)`（即 `reverse[AXElementKey(element)]`），这对当前 Space 的窗口
@@ -942,8 +958,7 @@ final class WindowStore {
     @objc private func handleAppActivated(_ notification: Notification) {
         guard
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-            app.activationPolicy == .regular,
-            app.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            app.activationPolicy == .regular
         else { return }
 
         let pid = app.processIdentifier

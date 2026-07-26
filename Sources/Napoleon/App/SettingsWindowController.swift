@@ -24,6 +24,10 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
     private let navigation = SettingsNavigation()
     private let makeContent: (SettingsNavigation) -> AnyView
 
+    /// 设置窗口显示/关闭时回调（`true` = 已显示）。调用方据此请求一次窗口列表刷新——
+    /// 见 `applyActivationPolicy` 说明：策略变化不产生任何系统通知。
+    var onVisibilityChanged: ((Bool) -> Void)?
+
     private var window: NSWindow?
     private var hostingView: NSHostingView<AnyView>?
     private var cancellables: Set<AnyCancellable> = []
@@ -44,14 +48,51 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
 
     /// 显示设置窗口：首次调用建窗，之后复用同一个（不会开出第二个）。
     ///
-    /// `NSApp.activate` 必须有——Napoleon 是 `LSUIElement` agent，进程默认不参与前台切换，
+    /// `NSApp.activate` 必须有——Napoleon 平时是 `.accessory`，进程不参与前台切换，
     /// 只 `makeKeyAndOrderFront` 的话窗口会垫在当前 App 后面，用户以为「点了没反应」。
     func show() {
         if window == nil {
             buildWindow()
         }
+        // 先切策略再激活：`.regular` 之后这个进程才算「有前台身份」的普通 App，激活与置前才
+        // 按常规窗口的方式生效。
+        applyActivationPolicy(settingsVisible: true)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        onVisibilityChanged?(true)
+    }
+
+    /// 按「设置窗口是否可见」切换进程的 activation policy。
+    ///
+    /// 平时 Napoleon 是 `.accessory`（对应 Info.plist 的 `LSUIElement`）：没有 Dock 图标、
+    /// 不参与前台切换——这正是一个菜单栏工具该有的样子。但设置窗口打开时它就是一扇**普通窗口**，
+    /// 用户理应能像对待任何 App 一样对待它：Dock 里有图标、能用切换器切回来、菜单栏显示菜单。
+    /// `.accessory` 下这些全都不成立，而且 Napoleon 自己的窗口枚举只收 `activationPolicy ==
+    /// .regular` 的 App（见 `WindowEnumerator`），所以它自己的设置窗口连自己的切换器都进不去。
+    ///
+    /// 因此窗口显示期间临时切成 `.regular`，关闭后切回 `.accessory`——这是菜单栏 App 需要展示
+    /// 真实窗口时的标准做法。**策略变化不会产生任何系统通知**（既不是 launch 也不是 terminate），
+    /// 所以两个方向都要显式请求一次窗口列表刷新，否则设置窗口要么进不了列表，要么关掉之后还
+    /// 赖在列表里。
+    private func applyActivationPolicy(settingsVisible: Bool) {
+        NSApp.setActivationPolicy(settingsVisible ? .regular : .accessory)
+        guard settingsVisible else { return }
+
+        // Dock tile 的图标要**显式喂**给 AppKit。运行时才从 `.accessory` 提升上来的进程，
+        // LaunchServices 当初是按「无图标的 agent」注册的，Dock 这时新建的 tile 不会回头去
+        // bundle 里取 `CFBundleIconName`——结果就是一个空白图标。（同一个原因也让
+        // `NSApp.applicationIconImage` 在本 App 里取不到图，见 `AboutView.appIcon`。）
+        // 资产目录里的 `AppIcon` 是可靠来源，这里直接赋给它；重复赋值无害。
+        if let icon = NSImage(named: "AppIcon") {
+            NSApp.applicationIconImage = icon
+        }
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        applyActivationPolicy(settingsVisible: false)
+        onVisibilityChanged?(false)
     }
 
     private func buildWindow() {
