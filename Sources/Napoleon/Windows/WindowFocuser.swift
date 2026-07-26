@@ -100,16 +100,25 @@ enum WindowFocuser {
     /// 目标窗口跑到了「次前台」，原来的 App 仍然占着最前台。自 Napoleon 的设置窗口成为切换器
     /// 里可选的一项之后，这条路径才真正可达。
     ///
-    /// 进程把自己带到前台要用 `NSApplication.activate(ignoringOtherApps:)`——设置窗口从菜单栏
-    /// 打开时用的就是它，已验证有效。它在 macOS 14 标记为废弃，但替代的无参 `activate()` 同样
-    /// 受协作式激活约束、在这里正是不管用的那个，所以继续用这一个。
+    /// 降级路径用 `NSApplication.activate(ignoringOtherApps:)`。它**不是**等价替代：设置窗口从
+    /// 菜单栏打开时它有效，是因为那一下紧跟在一次真实的用户交互之后（系统给了激活授信）；而切换器
+    /// 提交聚焦时没有这份授信，同一个调用就不管用了——这正是 `SelfFrontProcess` 存在的理由，两处
+    /// 注释看似矛盾，差别全在「有没有用户交互授信」。它在 macOS 14 标记为废弃，但替代的无参
+    /// `activate()` 同样受协作式激活约束、在这里同样不管用，所以继续用这一个。
     ///
     /// O5（同 App 内切换的假失败）：macOS 14+ 协作式激活下，如果目标窗口所属的 App 已经是前台
     /// （很常见——比如同一个 App 内用 Cmd+` 循环窗口），`activate()` 经常返回 `false`，即使
     /// raise/AXMain 已经生效、窗口确实前置成功。所以只要 `activate()` 返回 true，**或者**该 App
     /// 本来就已经/最终是前台（`app.isActive`），就算成功；两者都不满足才是真失败。
     private static func activateApp(pid: ProcessID) -> Bool {
-        guard pid != ProcessInfo.processInfo.processIdentifier else {
+        guard pid != NSRunningApplication.ownProcessID else {
+            // 窗口级前置必须自己补：`SelfFrontProcess` 传的 windowID 是 0，它只把**进程**提到
+            // 前台，既不抬升任何窗口、也不触发 Space 跳转。走 `focusApp`（跨 Space/全屏、没有
+            // AX 句柄）这条路时前面没有任何 AXRaise，少了这一步就是「选了没反应」：进程到了
+            // 前台，屏幕还停在原来的 Space 上。同进程不必绕 AX，直接拿 NSWindow 更准也更快。
+            // 浮层是 `canBecomeMain == false` 的非激活面板，天然被这个条件排除掉。
+            NSApp.windows.first { $0.isVisible && $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+
             // 自我激活：公开 API 在 macOS 14+ 协作式激活下全部失效（实测见 `SelfFrontProcess`
             // 与 `spikes/frontprocess`），走私有 SkyLight 调用；符号缺失时退回公开 API——
             // 那条路不可靠但偶尔有效，且绝不崩溃。
@@ -117,7 +126,9 @@ enum WindowFocuser {
                 return true
             }
             NSApp.activate(ignoringOtherApps: true)
-            return NSRunningApplication.current.isActive
+            // 降级路径的效果没法当场判定：自我激活要等 run loop 转机才会反映到 `isActive`，
+            // 在这里同步读必然是 `false`。已经尽力了就报成功，不制造假失败的日志噪音。
+            return true
         }
         guard let app = NSRunningApplication(processIdentifier: pid) else {
             return false // App 已退出
