@@ -34,8 +34,8 @@ targets:
         # 版本号显式写在这里（不再吃 XcodeGen 的 1.0/1 默认值）——About 页展示它，
         # 检查更新拿它跟 GitHub Release 的 tag 比对。发版时改这两行。
         CFBundleShortVersionString: "0.1.0"   # 面向用户的版本号，对应 Release tag v0.1.0
-        # CFBundleVersion（构建号）由下面的 postCompileScripts 在每次构建时写成 git 提交数——
-        # 这里的值只是占位，实际产物里不会保留它。
+        # CFBundleVersion（构建号）由下面的 preBuildScripts 在每次构建时写成 git 提交数。这里的
+        # 值只是占位；拿不到 git（比如下载 zip 源码构建）时它会原样留在产物里。
         CFBundleVersion: "0"
         NSHumanReadableCopyright: "© 2026 Ryekee"
     # 构建号 = git 提交数。Xcode 不会自动递增构建号，写死在 project.yml 里则永远是同一个数字，
@@ -50,9 +50,30 @@ targets:
       - name: Stamp build number from git
         basedOnDependencyAnalysis: false   # 无输出产物，本来就该每次构建都跑
         script: |
-          set -e
-          BUILD=$(git -C "$SRCROOT" rev-list --count HEAD 2>/dev/null || echo 0)
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$SRCROOT/Resources/Info.plist"
+          set -eu
+          PLIST="$SRCROOT/Resources/Info.plist"
+
+          # 拿不到 git 就**不写**，保留占位值。原先是 `|| echo 0`，那会让构建号从 5 静默倒退到
+          # 0——构建号倒退对 LaunchServices 的「同一 bundle 哪份更新」判定有影响，将来接上
+          # Sparkle 之后更是直接变成一个谁都升不上去的死版本。宁可不盖章也不要盖一个错的。
+          if ! BUILD=$(git -C "$SRCROOT" rev-list --count HEAD 2>/dev/null); then
+            echo "warning: 不在 git 仓库里（或没有 git），CFBundleVersion 保持占位值不变"
+            exit 0
+          fi
+
+          # 浅克隆是最坏的一种：不报错、不为零，安安静静给出一个错的小数字（--depth 1 就是 1）。
+          # 这种情况必须响亮地失败——发布构建绝不该带着一个错的构建号出门。
+          if [ "$(git -C "$SRCROOT" rev-parse --is-shallow-repository)" = "true" ]; then
+            echo "error: 浅克隆下 git 提交数不是真实构建号；请用完整克隆构建" >&2
+            exit 1
+          fi
+
+          # 值没变就不写：PlistBuddy 无条件写会改 mtime，害得每次增量构建都重跑
+          # Process Info.plist 并重新签名。
+          CURRENT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || echo "")
+          if [ "$CURRENT" != "$BUILD" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
+          fi
     scheme:
       testTargets: [NapoleonTests]      # 让 `Napoleon` scheme 的 test action 挂上 App 层单测
   NapoleonCore:
