@@ -107,10 +107,18 @@ final class AppServices {
                 )
             )
         }
-        // 设置窗口开/关会切换 activation policy（`.regular` ↔ `.accessory`），窗口列表因此
-        // 多出或少掉 Napoleon 自己的窗口——而策略变化不发任何系统通知，必须显式刷新一次。
-        settingsWindow.onVisibilityChanged = { [weak self] _ in
-            self?.windowStore.requestRefresh()
+        // 设置窗口开/关时窗口列表会多出或少掉 Napoleon 自己的窗口，而这件事不发任何系统通知
+        // （自身进程的窗口销毁通知也走不到 `AXObserver`），必须显式告诉 store。
+        //
+        // 关闭要**同步**摘除而不只是排一次刷新：刷新是 200ms debounce，那段空窗期里窗口还在列表
+        // 中、AX 句柄也还有效，被切中就会把 Napoleon 提到一扇已经关掉的窗口上。摘完照旧再刷一次
+        // 兜底（列表里别的东西可能也变了）。
+        settingsWindow.onVisibilityChanged = { [weak self] _, closingWindowID in
+            guard let self else { return }
+            if let closingWindowID {
+                self.windowStore.forget(windowID: closingWindowID)
+            }
+            self.windowStore.requestRefresh()
         }
         self.settingsWindow = settingsWindow
 

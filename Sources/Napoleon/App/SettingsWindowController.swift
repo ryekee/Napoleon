@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import NapoleonCore
 import SwiftUI
 
 /// 设置窗口：一个自己托管的 `NSWindow`，顶部用 `NSToolbar`（`.preference` 样式）做分页标签栏，
@@ -24,9 +25,13 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
     private let navigation = SettingsNavigation()
     private let makeContent: (SettingsNavigation) -> AnyView
 
-    /// 设置窗口显示/关闭时回调（`true` = 已显示）。调用方据此请求一次窗口列表刷新——
+    /// 设置窗口显示/关闭时回调（`visible == true` = 已显示）。调用方据此请求一次窗口列表刷新——
     /// 见 `applyActivationPolicy` 说明：策略变化不产生任何系统通知。
-    var onVisibilityChanged: ((Bool) -> Void)?
+    ///
+    /// `closingWindowID` 只在关闭时非 `nil`，是这扇窗口的 `CGWindowID`。调用方要拿它**同步**把窗口
+    /// 从列表里摘掉（`WindowStore.forget(windowID:)`），不能只靠刷新：刷新是 200ms 的 debounce，
+    /// 这段空窗期里窗口仍在列表中且句柄仍然有效，被选中就会把 Napoleon 提到一个不存在的窗口上。
+    var onVisibilityChanged: ((_ visible: Bool, _ closingWindowID: WindowID?) -> Void)?
 
     private var window: NSWindow?
     private var hostingView: NSHostingView<AnyView>?
@@ -59,7 +64,7 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
         applyActivationPolicy(settingsVisible: true)
         NSApp.activate(ignoringOtherApps: true)   // accessory App 自我激活是允许的
         window?.makeKeyAndOrderFront(nil)
-        onVisibilityChanged?(true)
+        onVisibilityChanged?(true, nil)
     }
 
     /// 切换进程的 activation policy——**只为了 Dock 图标**，条件是「设置窗口正处于前台」。
@@ -85,17 +90,24 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
         // LaunchServices 当初是按「无图标的 agent」注册的，Dock 这时新建的 tile 不会回头去
         // bundle 里取 `CFBundleIconName`——结果就是一个空白图标。（同一个原因也让
         // `NSApp.applicationIconImage` 在本 App 里取不到图，见 `AboutView.appIcon`。）
-        // 资产目录里的 `AppIcon` 是可靠来源，这里直接赋给它；重复赋值无害。
-        if let icon = NSImage(named: "AppIcon") {
-            NSApp.applicationIconImage = icon
-        }
+        // 兜底跟 `AboutView` 用同一条：`NSImage(named:)` 不保证拿得到，而这里一旦拿不到就
+        // 什么都不做的话，留下的正是这段代码要修的那个空白 Dock 图标。
+        NSApp.applicationIconImage = Self.appIcon
+    }
+
+    /// App 图标的可靠来源：优先资产目录，退回 bundle 自己的图标。与 `AboutView.appIcon` 同源。
+    static var appIcon: NSImage {
+        NSImage(named: "AppIcon") ?? NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
     }
 
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
         applyActivationPolicy(settingsVisible: false)
-        onVisibilityChanged?(false)   // 窗口没了 → 请求刷新，把它从切换器列表里去掉
+        // 把 `CGWindowID` 一起交出去，让调用方同步摘掉它——只请求刷新会留下 200ms 的幽灵窗口，
+        // 见 `onVisibilityChanged` 的文档。`windowNumber` 在窗口关闭前取，关闭后就取不到了。
+        let closingID = window.flatMap { WindowID(exactly: $0.windowNumber) }
+        onVisibilityChanged?(false, closingID)
     }
 
     /// 设置窗口成为前台（菜单栏打开、Dock 点击、或从切换器切回来）——提升为 `.regular` 拿回
@@ -103,6 +115,16 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
     /// 触发，Dock 图标因此自然恢复。
     func windowDidBecomeKey(_ notification: Notification) {
         applyActivationPolicy(settingsVisible: true)
+    }
+
+    /// 设置窗口失去 key——降回 `.accessory`。
+    ///
+    /// 少了这一条，「用户不关设置窗口、直接用系统 Cmd+Tab 或点 Dock 切到别的 App」这条路径会让
+    /// Napoleon 停在「`.regular` 且不在前台」——正是 `applyActivationPolicy` 文档里标为严重回归的
+    /// 那个状态（普通 App 不在前台时无权激活别的 App，切换器失效）。`WindowFocuser` 在切走时的
+    /// 那次降级只覆盖「经由 Napoleon 切换器切走」，覆盖不到系统自己的切换。
+    func windowDidResignKey(_ notification: Notification) {
+        applyActivationPolicy(settingsVisible: false)
     }
 
 
@@ -160,7 +182,12 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
         guard let window, let hostingView else { return }
         updateTitle(for: tab)
 
-        // 先让 SwiftUI 按新页面重新布局，再问它高度，否则拿到的是上一页的尺寸。
+        // 先把宽度钉成窗口的实际宽度再量高度。`fittingSize` 给的是 SwiftUI 的**理想**尺寸，
+        // 而窗口宽度是固定的 520：当某段说明文字的理想宽度超过 520（换个语言就可能发生），
+        // SwiftUI 报的是「一行放得下」时的高度，真正排版时会换行、变高——照理想值定尺寸就会
+        // 把底部内容截掉。先给一个 520 宽的 frame，布局便是在真实宽度下算的。
+        hostingView.frame.size.width = Self.contentWidth
+        // 再让 SwiftUI 按新页面重新布局，然后才问它高度，否则拿到的是上一页的尺寸。
         hostingView.layoutSubtreeIfNeeded()
 
         let available = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
