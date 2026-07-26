@@ -57,23 +57,26 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
         // 先切策略再激活：`.regular` 之后这个进程才算「有前台身份」的普通 App，激活与置前才
         // 按常规窗口的方式生效。
         applyActivationPolicy(settingsVisible: true)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate(ignoringOtherApps: true)   // accessory App 自我激活是允许的
         window?.makeKeyAndOrderFront(nil)
         onVisibilityChanged?(true)
     }
 
-    /// 按「设置窗口是否可见」切换进程的 activation policy。
+    /// 切换进程的 activation policy——**只为了 Dock 图标**，条件是「设置窗口正处于前台」。
     ///
     /// 平时 Napoleon 是 `.accessory`（对应 Info.plist 的 `LSUIElement`）：没有 Dock 图标、
-    /// 不参与前台切换——这正是一个菜单栏工具该有的样子。但设置窗口打开时它就是一扇**普通窗口**，
-    /// 用户理应能像对待任何 App 一样对待它：Dock 里有图标、能用切换器切回来、菜单栏显示菜单。
-    /// `.accessory` 下这些全都不成立，而且 Napoleon 自己的窗口枚举只收 `activationPolicy ==
-    /// .regular` 的 App（见 `WindowEnumerator`），所以它自己的设置窗口连自己的切换器都进不去。
+    /// 不参与前台切换——菜单栏工具该有的样子。设置窗口在前台时它是一扇普通窗口，Dock 里理应有
+    /// 图标，所以那时提升为 `.regular`。
     ///
-    /// 因此窗口显示期间临时切成 `.regular`，关闭后切回 `.accessory`——这是菜单栏 App 需要展示
-    /// 真实窗口时的标准做法。**策略变化不会产生任何系统通知**（既不是 launch 也不是 terminate），
-    /// 所以两个方向都要显式请求一次窗口列表刷新，否则设置窗口要么进不了列表，要么关掉之后还
-    /// 赖在列表里。
+    /// **不能一直保持 `.regular`**（最初就是这么写的，导致了一个严重回归）：普通 App 在自己不
+    /// 处于前台时无权激活别的 App（macOS 14 协作式激活的防抢焦点规则），而 Napoleon 恰恰总是在
+    /// 后台完成激活——切换器会因此彻底失效，目标窗口只升到「次前台」。所以绑定的是**前台状态**
+    /// 而不是「窗口是否存在」：窗口失去 key、或被 `WindowFocuser` 切去别的 App 时都会降回
+    /// `.accessory`。设置窗口出现在切换器列表里则与策略无关，由 `WindowEnumerator` 无条件纳入
+    /// 自身进程来保证。
+    ///
+    /// **策略变化不产生任何系统通知**（既不是 launch 也不是 terminate），所以窗口开/关时要显式
+    /// 请求一次窗口列表刷新，否则设置窗口要么进不了列表，要么关掉之后还赖在列表里。
     private func applyActivationPolicy(settingsVisible: Bool) {
         NSApp.setActivationPolicy(settingsVisible ? .regular : .accessory)
         guard settingsVisible else { return }
@@ -92,8 +95,16 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
 
     func windowWillClose(_ notification: Notification) {
         applyActivationPolicy(settingsVisible: false)
-        onVisibilityChanged?(false)
+        onVisibilityChanged?(false)   // 窗口没了 → 请求刷新，把它从切换器列表里去掉
     }
+
+    /// 设置窗口成为前台（菜单栏打开、Dock 点击、或从切换器切回来）——提升为 `.regular` 拿回
+    /// Dock 图标。切换器把它切回来时走的是 `SelfFrontProcess` 的私有前置，激活后这个回调随之
+    /// 触发，Dock 图标因此自然恢复。
+    func windowDidBecomeKey(_ notification: Notification) {
+        applyActivationPolicy(settingsVisible: true)
+    }
+
 
     private func buildWindow() {
         let hosting = NSHostingView(rootView: makeContent(navigation))

@@ -61,19 +61,7 @@ enum WindowFocuser {
         }
 
         // 4. 激活所属 App——跨 Space / 全屏跳转靠这步 + 前面的 raise 触发（Spike 2 验证）。
-        guard let app = NSRunningApplication(processIdentifier: pid) else {
-            return false // App 已退出
-        }
-
-        // O5（同 App 内切换的假失败）：macOS 14+ 协作式激活下，如果目标窗口所属的 App
-        // 已经是前台 App（很常见——比如同一个 App 内用 Cmd+` 循环窗口），`activate()`
-        // 经常返回 `false`，即使前面的 raise/AXMain 已经在一个有效元素上生效、窗口确实
-        // 前置成功了。只用 `activate()` 的返回值判定整体成功与否，会在这种「同 App 内
-        // 切换」场景下把明明成功的一次聚焦误报成失败。改成：走到这一步说明 raise/AXMain
-        // 都已作用在有效元素上，只要 `activate()` 返回 true，或者该 App 本来就已经/最终
-        // 是前台（`app.isActive`），就算整体成功；只有两者都不满足才是真失败。
-        let activateResult = app.activate()
-        let success = activateResult || app.isActive
+        let success = activateApp(pid: pid)
 
         // 5. Minimized 异步动画兜底：第 1 步只是发起了解最小化，系统用一个异步动画完成它，
         // 上面第 2/3 步的 AXRaise/AXMain 有可能在动画结束前就已经跑完、对仍处于视觉最小化
@@ -99,9 +87,52 @@ enum WindowFocuser {
     /// （`app.isActive`），都算成功；App 已退出则返回 `false`。
     @discardableResult
     static func focusApp(pid: ProcessID) -> Bool {
+        activateApp(pid: pid)
+    }
+
+    // MARK: - Activation
+
+    /// 把 `pid` 对应的 App 带到前台。
+    ///
+    /// **目标是 Napoleon 自己时必须走另一条路**：`NSRunningApplication.activate()` 是 macOS 14+
+    /// 的协作式激活，而「一个当前不在前台的进程请求把**自己**提到前台」正是这套机制要禁止的
+    /// 行为（防 App 抢焦点）——系统会照常抬升窗口、却不改变前台 App。症状就是用户报的那个：
+    /// 目标窗口跑到了「次前台」，原来的 App 仍然占着最前台。自 Napoleon 的设置窗口成为切换器
+    /// 里可选的一项之后，这条路径才真正可达。
+    ///
+    /// 进程把自己带到前台要用 `NSApplication.activate(ignoringOtherApps:)`——设置窗口从菜单栏
+    /// 打开时用的就是它，已验证有效。它在 macOS 14 标记为废弃，但替代的无参 `activate()` 同样
+    /// 受协作式激活约束、在这里正是不管用的那个，所以继续用这一个。
+    ///
+    /// O5（同 App 内切换的假失败）：macOS 14+ 协作式激活下，如果目标窗口所属的 App 已经是前台
+    /// （很常见——比如同一个 App 内用 Cmd+` 循环窗口），`activate()` 经常返回 `false`，即使
+    /// raise/AXMain 已经生效、窗口确实前置成功。所以只要 `activate()` 返回 true，**或者**该 App
+    /// 本来就已经/最终是前台（`app.isActive`），就算成功；两者都不满足才是真失败。
+    private static func activateApp(pid: ProcessID) -> Bool {
+        guard pid != ProcessInfo.processInfo.processIdentifier else {
+            // 自我激活：公开 API 在 macOS 14+ 协作式激活下全部失效（实测见 `SelfFrontProcess`
+            // 与 `spikes/frontprocess`），走私有 SkyLight 调用；符号缺失时退回公开 API——
+            // 那条路不可靠但偶尔有效，且绝不崩溃。
+            if SelfFrontProcess.bringToFront() {
+                return true
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            return NSRunningApplication.current.isActive
+        }
         guard let app = NSRunningApplication(processIdentifier: pid) else {
             return false // App 已退出
         }
+
+        // 切到**别的** App 之前先确保自己不是 `.regular`。协作式激活只豁免后台代理
+        // （`.accessory`）——一个不在前台的普通 App 无权把别的 App 提到前台，系统会照常执行
+        // 前面的 AXRaise、却不改变前台 App：目标窗口停在「次前台」，原来的 App 仍占着最前。
+        // 设置窗口在前台时进程是 `.regular`（为了 Dock 图标），所以这里顺手降回来——反正这次
+        // 操作的结果就是切走、我们本来就要退到后台。用户切回设置窗口时
+        // `SettingsWindowController` 会在它重新成为 key window 时再提升回去。
+        if NSApp.activationPolicy() == .regular {
+            NSApp.setActivationPolicy(.accessory)
+        }
+
         return app.activate() || app.isActive
     }
 
