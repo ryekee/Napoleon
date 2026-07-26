@@ -8,12 +8,18 @@ import QuartzCore
 enum SwitcherMetrics {
     /// Inset between the card's own edge and the thumbnail box on every side.
     static let cardPadding: CGFloat = 8
-    /// Gap between the thumbnail's bottom edge and the label strip's top edge.
+    /// Gap between the thumbnail box and the label strip.
+    ///
+    /// The name says "top" because the arithmetic below reads top-down, but on screen the label
+    /// strip sits **above** the thumbnail — see the coordinate-system note in `WindowCardLayer`'s
+    /// header doc. Every constant in this enum is a distance, not a direction, so the layout math
+    /// is unaffected; only the prose would mislead you.
     static let titleTopGap: CGFloat = 6
     /// Height of the primary (app name) label line — task UI-Tweak: two-line card labels, app
     /// name is now the primary/larger line.
     static let appNameHeight: CGFloat = 16
-    /// Vertical gap between the app-name line and the window-title line below it.
+    /// Vertical gap between the app-name line and the window-title line (which renders *above* it
+    /// on screen — same flipped-geometry caveat as `titleTopGap`).
     static let labelLineGap: CGFloat = 2
     /// Height of the secondary (window title) label line — smaller/dimmer than `appNameHeight`,
     /// what distinguishes windows of the same multi-window app from each other.

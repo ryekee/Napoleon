@@ -8,9 +8,11 @@ import QuartzCore
 /// by `SwitcherView.render(...)` — no Auto Layout, no SwiftUI diffing, deterministic first-frame.
 ///
 /// **Two-line label** (task UI-Tweak): `appNameLayer` (primary, larger, ~90% white) shows the
-/// owning app's name; `titleLayer` (secondary, smaller, ~55% white) shows the window's own title
-/// below it. The app name is primary because a single multi-window app (e.g. several Chrome tabs)
-/// otherwise renders as indistinguishable cards when only the window title was shown.
+/// owning app's name; `titleLayer` (secondary, smaller, ~55% white) shows the window's own title.
+/// The app name is primary because a single multi-window app (e.g. several Chrome tabs) otherwise
+/// renders as indistinguishable cards when only the window title was shown. On screen the title
+/// line sits *above* the app-name line, and the whole label strip sits *above* the thumbnail —
+/// see the geometry note below; it is not what the frame arithmetic reads like.
 ///
 /// **Reuse, not rebuild**: `SwitcherView` keeps one `WindowCardLayer` alive per `WindowID` across
 /// `render(...)` calls within a switcher session (a small pool keyed by id) instead of destroying
@@ -25,15 +27,27 @@ import QuartzCore
 /// **`y` is measured upward from the card's bottom edge: a larger `y` renders higher on
 /// screen.**
 ///
-/// That is the opposite of what the numbers below read like at a glance, and it is why the
-/// card renders label-strip-on-top / thumbnail-underneath even though the thumbnail is given
-/// the smaller `y`. The layout was tuned against what is actually on screen and the user
-/// approved that arrangement, so the flip is left as is rather than "fixed" — but any change
-/// to these frames has to be reasoned about bottom-up, and verified visually.
+/// This was verified empirically, not inferred: replicating the exact nesting (an `isFlipped`
+/// host view whose layer holds a sublayer with `isGeometryFlipped = true`) and both rendering it
+/// and running `CALayer.convert` shows a sublayer at `y == 0` landing at the card's **bottom**.
+/// The historical record agrees — before the badge moved, its `y` was `cardPadding +
+/// thumbnailHeight - badgeSize * 0.75` (a large `y`) and it appeared in the thumbnail's *top*
+/// left corner.
+///
+/// The consequence is that the card renders **upside down relative to how the frames below
+/// read**: window title on top, then app name, then the thumbnail at the bottom. That is the
+/// opposite of the conventional switcher card and the opposite of what every name in this file
+/// suggests. It is nonetheless the arrangement in use — reviewed and deliberately kept — so the
+/// flip stays. Any change to these frames has to be reasoned about bottom-up and verified
+/// visually; do not "fix" the arithmetic to match the prose.
 final class WindowCardLayer: CALayer {
     private let thumbnailContainer = CALayer()
     private let iconLayer = CALayer()
     private let thumbnailLayer = CALayer()
+    /// Badge 的投影层。必须与 `badgeLayer` 分开：一个 layer 的 `masksToBounds`（badge 要靠它
+    /// 把图标裁成圆角）会把**它自己**的投影一起裁掉，两个属性放同一层上互斥。所以外层只管投影
+    /// 不裁剪，内层只管裁剪不投影。
+    private let badgeShadowLayer = CALayer()
     private let badgeLayer = CALayer()
     /// Primary label line — the owning app's name (larger, brighter than `titleLayer`).
     private let appNameLayer = CATextLayer()
@@ -140,23 +154,34 @@ final class WindowCardLayer: CALayer {
         // coordinate system in the type's header doc. Hence the visual bottom of the thumbnail
         // is at `y == cardPadding`, and subtracting a quarter of the badge drops it below.
         let badgeSize = SwitcherMetrics.badgeSize
-        badgeLayer.frame = CGRect(
+        let badgeCorner = SwitcherMetrics.badgeCornerRadius
+        badgeShadowLayer.frame = CGRect(
             x: SwitcherMetrics.cardPadding + (cardStyle.thumbnailSize.width - badgeSize) / 2,
             y: SwitcherMetrics.cardPadding - badgeSize * 0.25,
             width: badgeSize,
             height: badgeSize
         )
-        badgeLayer.cornerRadius = SwitcherMetrics.badgeCornerRadius
+        badgeShadowLayer.shadowColor = NSColor.black.cgColor
+        badgeShadowLayer.shadowOpacity = 0.5
+        badgeShadowLayer.shadowRadius = 3
+        badgeShadowLayer.shadowOffset = CGSize(width: 0, height: 1)
+        // 形状是已知的圆角矩形，直接给 `shadowPath`：省掉 Core Animation 每帧从 alpha 通道推
+        // 投影轮廓的开销，这里是每张卡片都要走的热路径。
+        badgeShadowLayer.shadowPath = CGPath(
+            roundedRect: CGRect(origin: .zero, size: CGSize(width: badgeSize, height: badgeSize)),
+            cornerWidth: badgeCorner, cornerHeight: badgeCorner, transform: nil
+        )
+        addSublayer(badgeShadowLayer)
+
+        // 内层填满外层，只负责把图标裁成圆角；投影归外层管（见 `badgeShadowLayer` 的注释）。
+        badgeLayer.frame = CGRect(origin: .zero, size: CGSize(width: badgeSize, height: badgeSize))
+        badgeLayer.cornerRadius = badgeCorner
         badgeLayer.masksToBounds = true
         badgeLayer.backgroundColor = cardStyle.badgeBackground
         badgeLayer.borderWidth = 1
         badgeLayer.borderColor = cardStyle.badgeBorderColor
         badgeLayer.contentsGravity = .resizeAspect
-        badgeLayer.shadowColor = NSColor.black.cgColor
-        badgeLayer.shadowOpacity = 0.5
-        badgeLayer.shadowRadius = 3
-        badgeLayer.shadowOffset = CGSize(width: 0, height: 1)
-        addSublayer(badgeLayer)
+        badgeShadowLayer.addSublayer(badgeLayer)
 
         let labelWidth = cardStyle.cardSize.width - SwitcherMetrics.cardPadding * 2
 
@@ -205,7 +230,7 @@ final class WindowCardLayer: CALayer {
     /// does not inherit `contentsScale` down from its superlayer, so each hand-added sublayer
     /// needs it set directly to stay crisp on whichever screen the switcher is currently shown on.
     func update(appName: String, title: String, icon: NSImage?, thumbnail: CGImage?, isSelected: Bool, contentsScale: CGFloat) {
-        for sublayer: CALayer in [self, thumbnailContainer, iconLayer, thumbnailLayer, badgeLayer, appNameLayer, titleLayer] {
+        for sublayer: CALayer in [self, thumbnailContainer, iconLayer, thumbnailLayer, badgeShadowLayer, badgeLayer, appNameLayer, titleLayer] {
             sublayer.contentsScale = contentsScale
         }
 
