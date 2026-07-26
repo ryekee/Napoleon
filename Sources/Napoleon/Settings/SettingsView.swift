@@ -32,14 +32,18 @@ struct SettingsView: View {
     ]
 
     var body: some View {
-        Group {
-            switch navigation.tab {
-            case .general: generalTab
-            case .appearance: appearanceTab
-            case .permissions: permissionsTab
-            case .about: AboutView(updateChecker: updateChecker)
+        ScrollView {
+            Group {
+                switch navigation.tab {
+                case .general: generalTab
+                case .appearance: appearanceTab
+                case .permissions: permissionsTab
+                case .about: AboutView(updateChecker: updateChecker)
+                }
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
+        .scrollBounceBehavior(.basedOnSize)
         // 同 `AboutView`：只横向撑满，纵向报自然高度，让窗口按内容自适应。
         .frame(maxWidth: .infinity)
         .onAppear { refreshLiveState() }

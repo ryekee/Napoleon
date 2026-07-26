@@ -178,6 +178,12 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
     /// 高度取自 `NSHostingView.fittingSize`（SwiftUI 算出的理想高度）而不是每页写死的常量：
     /// 写死的数字一定会过期——加一个设置项就得记得同步改，改漏了要么页面被截断（内容够不着）
     /// 要么底部留一大片空白。上下用 `minHeight`/屏幕可用高度夹一下，防止极端值。
+    ///
+    /// **上限夹住的时候内容并不会丢**：各页在 `SettingsView` 里套了 `ScrollView`，超出的部分可以
+    /// 滚到。这不是理论上的保险——实测「通用」页的自然高度是 738pt，而 13" 笔记本的可用高度减去
+    /// `screenMargin` 只有约 655pt，也就是说在小屏上它本来就够不着底部的开关，且窗口不可缩放。
+    /// 各页自然高度（520pt 宽下实测）：通用 738、外观 554、权限 330、关于 258——差了近三倍，所以
+    /// 用的是「按内容自适应 + 封顶」而不是所有页共用一个固定高度，否则关于页要空掉一大半。
     private func resizeWindow(for tab: SettingsTab, animated: Bool) {
         guard let window, let hostingView else { return }
         updateTitle(for: tab)
