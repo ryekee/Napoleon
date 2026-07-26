@@ -343,6 +343,31 @@ final class WindowStore {
         scheduleFullRefresh()
     }
 
+    /// **同步**摘掉一扇已知消失的窗口，不等 `requestRefresh()` 那 200ms 的 debounce。
+    ///
+    /// 给「调用方比系统更早知道窗口没了」的场景用——目前唯一的调用方是 Napoleon 自己的设置窗口
+    /// 关闭（`SettingsWindowController.windowWillClose`）。只发 `requestRefresh()` 是不够的：那是
+    /// 一个 200ms 的 debounce，这期间窗口仍留在 `state` 里、`handles` 里也仍有它的 AX 句柄，而
+    /// 自身进程的窗口销毁通知走不到这里（`AXObserver` 注册的是别的 App）。用户在这 200ms 内按
+    /// Cmd+Tab 就会看到一张已经关掉的设置窗口卡片，选中它更糟：`isReleasedWhenClosed = false`
+    /// 让 NSWindow 对象还活着，AX 句柄多半没失效，于是 AXRaise 静默成功、Napoleon 被提到前台，
+    /// 而屏幕上什么都没有——用户原来的 App 平白丢了焦点。
+    ///
+    /// 复用 `.destroyed` 那条正常路径：摘窗口 + 清句柄正反映射 + generation/journal 记账，与
+    /// `handleWindowDestroyed` 完全一致。调用方仍应照旧再排一次全量刷新兜底。
+    func forget(windowID id: WindowID) {
+        guard handles[id] != nil || state.windows.contains(where: { $0.id == id }) else { return }
+
+        stateGeneration += 1
+        state = WindowStoreReducer.reduce(state, .destroyed(id))
+        if let element = handles.removeValue(forKey: id) {
+            reverse.removeValue(forKey: AXElementKey(element: element))
+        }
+        if refreshInFlight {
+            journaledRemovedIDs.insert(id)
+        }
+    }
+
     /// 自愈：丢掉「所属进程已经不在了」的窗口。
     ///
     /// **为什么不能只靠 `didTerminateApplicationNotification`**：真机实测发现有的 App 退出时这个
@@ -621,7 +646,7 @@ final class WindowStore {
         CrossSpaceMerge.crossSpaceAdditions(
             axWindowIDs: Set(axWindows.map(\.id)),
             screenWindows: screenWindows,
-            keepApp: { NSRunningApplication(processIdentifier: $0)?.activationPolicy == .regular },
+            keepApp: NSRunningApplication.isRegularOrSelf(pid:),   // 与枚举侧同口径，含 Napoleon 自己
             isHiddenApp: { NSRunningApplication(processIdentifier: $0)?.isHidden ?? false },
             pinyin: PinyinTransformer.pinyin,
             isFullscreen: spaceClassifier.isOnFullscreenSpace
@@ -910,8 +935,8 @@ final class WindowStore {
     /// `MRU[1]`（“上一个窗口”）会一直停留在很久以前的值，典型症状是两个单窗口 App 之间来回
     /// 切换会卡死在其中一个上。
     ///
-    /// 只处理 `.regular` activation policy 的 App（跟 `WindowEnumerator`/`AXObserverController`
-    /// 只关心常规 App 的口径一致）。读 `kAXFocusedWindowAttribute` 用的是临时构造的
+    /// 只处理 `isRegularOrSelf` 的 App（跟 `WindowEnumerator`/`AXObserverController` 同一条判据，
+    /// 见 `NSRunningApplication.isRegularOrSelf`）。读 `kAXFocusedWindowAttribute` 用的是临时构造的
     /// `AXUIElementCreateApplication(pid)`——这次 AX 读取因为 R2 已经把系统级 messaging
     /// timeout 设成进程默认值 0.5s，不会因为目标 App 卡死而长时间挂起主线程。这是纯 MRU
     /// 原地更新，不改变窗口集合，不 bump `stateGeneration`（跟 `.focusedWindowChanged` 同样的
@@ -920,12 +945,16 @@ final class WindowStore {
     /// **不再排除 Napoleon 自己的 pid**。原先排除是出于「切换器自身的操作会让 Napoleon 短暂
     /// 成为前台、污染 MRU」的顾虑，但当时 Napoleon 根本没有任何标准窗口，那纯属防御性代码；
     /// 而且浮层是 `.nonactivatingPanel` + `canBecomeKey == false`（见 `OverlayPanel`），
-    /// 全代码库唯一的 `NSApp.activate` 就在设置窗口的 `show()` 里——也就是说，Napoleon 成为
-    /// 前台**当且仅当**用户主动打开了设置窗口。那正是应该记进 MRU 的一次真实激活：设置窗口现在
-    /// 是切换器里可选的普通窗口，切走再 Cmd+Tab 时它理应排在「上一个窗口」的位置。
+    /// Napoleon 成为前台**当且仅当**用户主动选择了设置窗口——菜单栏打开，或者从切换器里切回它
+    /// （`WindowFocuser` 的自我分支）。那正是应该记进 MRU 的一次真实激活：设置窗口现在是切换器
+    /// 里可选的普通窗口，切走再 Cmd+Tab 时它理应排在「上一个窗口」的位置。
     ///
-    /// 平时（`.accessory`）Napoleon 本来就被下面的 `activationPolicy == .regular` 守卫挡掉，
-    /// 不需要额外的 pid 判断。
+    /// **守卫必须用 `isRegularOrSelf` 而不是 `activationPolicy == .regular`**。这里曾经写成后者，
+    /// 以为「平时是 `.accessory` 的 Napoleon 自然会被挡掉，不需要额外判断」——逻辑正好反了：被挡掉
+    /// 的恰恰是该记 MRU 的那一次。从切换器切回设置窗口时，进程仍然是 `.accessory`（上一次切走时
+    /// 被 `WindowFocuser` 降级了），要等 `windowDidBecomeKey` 才升回 `.regular`；而这条通知与
+    /// `windowDidBecomeKey` 谁先到达没有保证，读到 `.accessory` 就直接 return，MRU 不更新，
+    /// 下一次 Cmd+Tab 的默认选中项因此指错。
     ///
     /// **跨 Space MRU 修复：解析优先于反查（不再只用 `reverse`）**。旧版本读到 `focusedRef`
     /// 之后走 `windowID(for:)`（即 `reverse[AXElementKey(element)]`），这对当前 Space 的窗口
@@ -958,7 +987,7 @@ final class WindowStore {
     @objc private func handleAppActivated(_ notification: Notification) {
         guard
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-            app.activationPolicy == .regular
+            app.isRegularOrSelf
         else { return }
 
         let pid = app.processIdentifier

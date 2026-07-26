@@ -94,14 +94,11 @@ final class WindowEnumerator: Sendable {
     }
 
     private static func snapshotRunningApplications() -> [AppSnapshot] {
-        // Napoleon 自己**无条件**纳入枚举，不看 activation policy：它平时是 `.accessory`
-        // （菜单栏 agent），但设置窗口开着的时候那就是一扇普通窗口，理应和别的窗口一样出现在
-        // 切换器里。不能靠「把进程提升为 `.regular`」来满足这个过滤条件——`.regular` 会让
-        // Napoleon 变成普通 App，而普通 App 在自己不处于前台时**无权激活别的 App**
-        // （macOS 14 协作式激活的防抢焦点规则），切换器的核心功能会因此失效。
-        let ownPID = ProcessInfo.processInfo.processIdentifier
+        // 常规 App + Napoleon 自己（设置窗口开着时它就是一扇普通窗口）。判据的完整理由见
+        // `NSRunningApplication.isRegularOrSelf`——这条判据同时被 AX 观察者、前台 MRU、跨 Space
+        // 合并使用，四处必须同口径。
         return NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular || $0.processIdentifier == ownPID }
+            .filter(\.isRegularOrSelf)
             .map {
                 AppSnapshot(
                     pid: $0.processIdentifier,

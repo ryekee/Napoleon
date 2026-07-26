@@ -107,7 +107,11 @@ final class AXObserverController {
         guard !isObservingWorkspace else { return }
         isObservingWorkspace = true
 
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+        // 判据与窗口枚举同口径（`isRegularOrSelf`）——Napoleon 自己也要观察。设置窗口既然会
+        // 出现在切换器里，它的最小化/改标题/关闭就必须像别的窗口一样有增量通知；只放开枚举、
+        // 不放开观察者的话，它的 `isMinimized`/`title` 会一直停在上次全量刷新的值：用户 ⌘M
+        // 最小化设置窗口后，「不显示最小化窗口」的设置会对它失效，而且没有自愈路径。
+        for app in NSWorkspace.shared.runningApplications where app.isRegularOrSelf {
             registerApp(pid: app.processIdentifier)
         }
 
@@ -176,7 +180,7 @@ final class AXObserverController {
     @objc private func handleAppLaunched(_ notification: Notification) {
         guard
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-            app.activationPolicy == .regular
+            app.isRegularOrSelf
         else { return }
 
         let pid = app.processIdentifier
