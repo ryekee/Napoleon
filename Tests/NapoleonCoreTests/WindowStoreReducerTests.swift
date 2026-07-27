@@ -103,3 +103,30 @@ import Testing
         #expect(result.mru.order == [1])
     }
 }
+
+// MARK: - `.reconciled`（对账补回窗口）
+
+@Suite struct WindowStoreReducerReconcileTests {
+    @Test func reconciledAppendsMissingWindowsWithoutDisturbingMRUHead() {
+        let state = WindowState(windows: [w(1)], mru: MRUTracker(order: [1]))
+        let result = WindowStoreReducer.reduce(state, .reconciled([w(2), w(3)]))
+        #expect(result.windows.map(\.id) == [1, 2, 3])
+        // 1 必须仍在 MRU 头部——否则快速切换会切到一扇刚补回来的窗口上
+        #expect(result.mru.order == [1, 2, 3])
+    }
+
+    @Test func reconciledLeavesAlreadyKnownWindowsCompletelyUntouched() {
+        let known = w(1, minimized: true)
+        let state = WindowState(windows: [known], mru: MRUTracker(order: [1]))
+        // 对账数据比热态旧/糙（没有 isMinimized 信息），不许覆盖已知窗口
+        let result = WindowStoreReducer.reduce(state, .reconciled([w(1, minimized: false)]))
+        #expect(result.windows == [known])
+        #expect(result.mru.order == [1])
+    }
+
+    @Test func reconciledWithNothingMissingIsANoOp() {
+        let state = WindowState(windows: [w(1), w(2)], mru: MRUTracker(order: [2, 1]))
+        let result = WindowStoreReducer.reduce(state, .reconciled([]))
+        #expect(result == state)
+    }
+}

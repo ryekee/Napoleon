@@ -21,6 +21,19 @@ public enum WindowEvent: Sendable {
     /// 显示在浮层里，正是这个原因。
     case appHiddenChanged(ProcessID, Bool)
     case spaceChanged(onCurrentSpaceIDs: Set<WindowID>)
+    /// 对账补回：窗口服务器说这些窗口此刻就在屏幕上，而热态里没有它们。
+    ///
+    /// 热态的窗口集合平时靠增量 AX 通知维护，全量刷新只在「App 启动 / 切 Space / 开关设置窗口」
+    /// 时才发生——一旦某次通知丢失或某次枚举结果偏少，错误就**永久**留在热态里，没有任何路径
+    /// 会去纠正它（真机实测：一个跑了 22 小时的进程，列表掉到只剩 2 扇窗口，连当前前台 App 的
+    /// 窗口都不在里面）。`WindowServerReconciler` 因此在每次呼出切换器时拿 `CGWindowList` 对一次
+    /// 账，把跟丢的窗口经由这个事件补回来。
+    ///
+    /// 语义刻意跟 `.created` 分开，两点不同：
+    /// - **只补不改**：已经在热态里的 id 一律原样保留。对账数据来自 `CGWindowList`，比热态糙
+    ///   （拿不到 subrole、最小化状态，也没有 AX 句柄），用它覆盖一份好数据是净损失。
+    /// - **排到 MRU 末尾**而不是第 0 位（`MRUTracker.appendUnknown`，理由见该方法）。
+    case reconciled([WindowInfo])
 }
 
 public enum WindowStoreReducer {
@@ -33,6 +46,12 @@ public enum WindowStoreReducer {
             } else {
                 state.windows.append(window)
                 state.mru.insert(window.id)
+            }
+
+        case .reconciled(let recovered):
+            for window in recovered where !state.windows.contains(where: { $0.id == window.id }) {
+                state.windows.append(window)
+                state.mru.appendUnknown(window.id)
             }
 
         case .destroyed(let id):

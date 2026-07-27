@@ -83,6 +83,11 @@ final class WindowStore {
     /// `{ false }` 保持既有行为（`WindowStore` 的单测与非 App 构造路径不必关心设置）。
     private let includesOtherSpaces: @MainActor () -> Bool
 
+    /// 对账用的地面真相来源（见 `reconcileWithWindowServer`）。做成闭包只为了可测——生产环境
+    /// 永远是默认值 `WindowServerReconciler.onScreenWindows`；测试注入一份固定的窗口列表，就能
+    /// 确定性地造出「窗口服务器看得见、热态里没有」的漂移，验证自愈真的会发生。
+    private let onScreenWindows: @MainActor () -> [OnScreenWindow]
+
     private let enumerator: WindowEnumerator
     private let observer: AXObserverController
     /// Task X2：全量刷新时额外并入的跨 Space/全屏窗口来源（公开 SCShareableContent，
@@ -208,8 +213,10 @@ final class WindowStore {
         resolver: WindowIDResolver = .init(),
         thumbnails: ThumbnailService? = nil,
         spaceClassifier: SpaceClassifier = .init(),
-        includesOtherSpaces: @escaping @MainActor () -> Bool = { false }
+        includesOtherSpaces: @escaping @MainActor () -> Bool = { false },
+        onScreenWindows: @escaping @MainActor () -> [OnScreenWindow] = { WindowServerReconciler.onScreenWindows() }
     ) {
+        self.onScreenWindows = onScreenWindows
         self.enumerator = enumerator
         self.observer = observer ?? AXObserverController()
         self.screenLister = screenLister
@@ -329,7 +336,55 @@ final class WindowStore {
     /// 和字典都是值类型（COW），这里是一次廉价的引用计数拷贝，不是深拷贝。
     func snapshot() -> (state: WindowState, handles: [WindowID: AXUIElement], currentSpaceIsFullscreen: Bool) {
         pruneTerminatedApps()
+        reconcileWithWindowServer()
         return (state, handles, currentSpaceIsFullscreen)
+    }
+
+    /// 自愈：把「窗口服务器说在屏幕上、而热态里没有」的窗口补回来。
+    ///
+    /// **为什么必须有这一步**：热态的窗口集合是单向衰减的——增量 AX 通知负责加减窗口，而全量刷新
+    /// 只由「App 启动 / 切 Space / 开关设置窗口」触发，三者都跟「热态是否还正确」毫无关系。任何一次
+    /// 丢失的通知、任何一次结果偏少的枚举，都会永久留在热态里。真机实测过最坏的样子：一个连续跑了
+    /// 22.5 小时的进程，列表掉到只剩 2 扇窗口，连用户当时正在用的前台 App 的窗口都不在里面，而同一
+    /// 时刻独立探针能正常枚举到 18 扇；启动任意一个 App 触发一次全量刷新，列表立刻全部恢复。
+    /// 缺的不是枚举能力，是对账。
+    ///
+    /// 放在 `snapshot()` 里跟 `pruneTerminatedApps()` 并列，理由也一样：切换器每次呼出都会经过这里，
+    /// 是唯一必须保证正确的时刻，且空闲时零开销（不呼出就不查）。成本是一次
+    /// `CGWindowListCopyWindowInfo`（实测中位数 0.86ms、最坏 6.7ms，纯进程内查询、无 AX IPC、
+    /// 不需要任何权限），相对一次浮层渲染可以忽略。
+    ///
+    /// 读不到窗口服务器（返回空数组）时**整个跳过**——那说明这次查询失败了，不代表「一扇窗口都没有」，
+    /// 拿它当真会得出「热态里所有窗口都是多余的」这种灾难性结论。这里本来也只补不删，但显式短路能让
+    /// 这个前提写在代码里，而不是依赖读者去推。
+    private func reconcileWithWindowServer() {
+        let onScreen = onScreenWindows()
+        guard !onScreen.isEmpty else { return }
+
+        let missing = WindowServerReconciler.missingWindows(
+            knownIDs: Set(state.windows.map(\.id)),
+            onScreen: onScreen,
+            appInfo: { pid in
+                guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
+                    return nil
+                }
+                return .init(name: app.localizedName ?? "", bundleID: app.bundleIdentifier, isHidden: app.isHidden)
+            },
+            pinyin: { [enumerator] title in enumerator.pinyinEnabled ? PinyinTransformer.pinyin(for: title) : nil }
+        )
+        guard !missing.isEmpty else { return }
+
+        // notice 级：这条日志是这类故障唯一的现场记录。上一次真机故障之所以只能靠推理定位，正是因为
+        // 热态漂移不留任何痕迹——补回窗口本身治好了症状，但没有它就永远说不清是什么把窗口弄丢的。
+        Self.logger.notice("""
+        window list drifted — recovering \(missing.count, privacy: .public) window(s) the store had lost \
+        (had \(self.state.windows.count, privacy: .public), window server sees \(onScreen.count, privacy: .public) on screen)
+        """)
+
+        state = WindowStoreReducer.reduce(state, .reconciled(missing))
+        // 补进来的条目只有 CGWindowList 那点信息、没有 AX 句柄，是临时工。排一次全量刷新，让 AX 那份
+        // 权威数据把它们替换成完整的（`.fullRefresh` 是整体替换语义），顺带纠正掉这里可能误收的窗口。
+        scheduleFullRefresh()
     }
 
     /// 请求一次全量刷新（debounce 合并，见 `scheduleFullRefresh`）。

@@ -29,3 +29,20 @@ import Testing
         #expect(m.ordered([w(1), w(2)]).map(\.id) == [1, 2])
     }
 }
+
+// MARK: - 对账补回的窗口（见 `MRUTracker.appendUnknown`）
+
+@Suite struct MRUTrackerAppendUnknownTests {
+    @Test func appendUnknownGoesToTheTailSoQuickSwitchKeepsWorking() {
+        var mru = MRUTracker(order: [7, 3])
+        mru.appendUnknown(99)
+        // 关键：7 仍是当前窗口、3 仍是「上一个窗口」——补回来的窗口不许插队
+        #expect(mru.order == [7, 3, 99])
+    }
+
+    @Test func appendUnknownIsANoOpForAWindowAlreadyRanked() {
+        var mru = MRUTracker(order: [7, 3])
+        mru.appendUnknown(3)
+        #expect(mru.order == [7, 3])
+    }
+}
