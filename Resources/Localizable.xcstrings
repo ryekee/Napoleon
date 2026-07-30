@@ -726,6 +726,151 @@
         }
       }
     },
+    "Applies to the all-windows switcher. The current-app shortcut always lists individual windows.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applies to the all-windows switcher. The current-app shortcut always lists individual windows."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅用于“所有窗口”切换器；“当前应用窗口”快捷键始终逐窗口显示。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "僅套用於「所有視窗」切換器；「目前 App 視窗」快捷鍵一律逐視窗顯示。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「すべてのウインドウ」の切り替えにのみ適用されます。「現在の App」のショートカットは常にウインドウ単位で表示します。"
+          }
+        }
+      }
+    },
+    "Find localized app and window names by typing Pinyin — “f” matches “访达”.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Find localized app and window names by typing Pinyin — “f” matches “访达”."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入拼音即可搜索本地化的应用和窗口名称——“f”可匹配“访达”。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "輸入拼音即可搜尋本地化的 App 和視窗名稱——「f」可比對「访达」。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ピンインでローカライズされた App 名とウインドウ名を検索できます。「f」で「访达」に一致します。"
+          }
+        }
+      }
+    },
+    "Group windows by application": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Group windows by application"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按应用聚合窗口"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "依 App 聚合視窗"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App ごとにウインドウをまとめる"
+          }
+        }
+      }
+    },
+    "Match Chinese names by Pinyin": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Match Chinese names by Pinyin"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用拼音匹配中文名称"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用拼音比對中文名稱"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中国語名をピンインで検索"
+          }
+        }
+      }
+    },
+    "Show individual windows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show individual windows"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "逐窗口显示"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "逐視窗顯示"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ウインドウを個別に表示"
+          }
+        }
+      }
+    },
     "Find Chinese window titles by typing Pinyin — “gouwu” matches “购物清单”.": {
       "extractionState": "manual",
       "localizations": {
@@ -1708,6 +1853,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "アクセスを求める"
+          }
+        }
+      }
+    },
+    "Restore Defaults": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore Defaults"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复默认设置"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回復預設值"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトに戻す"
           }
         }
       }

@@ -6,9 +6,14 @@ import os
 
 /// 触发类型：全局窗口切换 vs 当前 App 窗口切换。
 /// pid 由主线程 Controller 解析（Task 8+），tap 回调不查、保持廉价。
-enum HotkeyTrigger {
+enum HotkeyTrigger: Equatable {
     case allWindows
     case currentApp
+}
+
+enum GroupWindowStepDirection: Equatable {
+    case forward
+    case backward
 }
 
 /// HotkeyManager 的语义化输出：session 触发/提交（Task 7）+ session 内 Tab 循环/字符/方向键/取消（Task 8）。
@@ -16,6 +21,7 @@ protocol HotkeyManagerDelegate: AnyObject {
     func hotkeyDidTrigger(_ trigger: HotkeyTrigger)
     func hotkeyDidStepForward()
     func hotkeyDidStepBackward()
+    func hotkeyDidStepWithinGroup(backward: Bool)
     func hotkeyDidReceiveChar(_ s: String)
     func hotkeyDidDeleteChar()
     func hotkeyDidMove(dx: Int, dy: Int)
@@ -33,7 +39,8 @@ protocol HotkeyManagerDelegate: AnyObject {
 /// - `allWindowsChord`/`currentAppChord`（合并存于 `chordState`）是唯一跨线程共享的可变状态（主线程
 ///   `updateChords` 写，tap 线程回调读），用 `OSAllocatedUnfairLock` 保护；每次 session-外判定读取时
 ///   做一次性快照，避免持锁跨越两次比较。
-/// - delegate 回调一律 `DispatchQueue.main.async`，tap 线程不直接碰 delegate / UI。
+/// - delegate 回调一律在主线程：tap 线程通过 `DispatchQueue.main.async` 派发；本来就在主线程的
+///   `cancelActiveSession()` 可直接通知。tap 线程不直接碰 delegate / UI。
 final class HotkeyManager {
     weak var delegate: HotkeyManagerDelegate?
 
@@ -72,6 +79,11 @@ final class HotkeyManager {
     private var sessionActive = false
     private var currentTrigger: HotkeyTrigger?
     private var currentChord: Chord?
+    /// tap 线程拥有的会话序号 + 一份加锁镜像。UI 请求取消时先拿到“当前是哪一轮”，排到 tap
+    /// run loop 的 block 只取消同一轮，避免极端时序下误伤紧接着开始的新会话。
+    private var nextSessionID: UInt64 = 0
+    private var currentSessionID: UInt64?
+    private let activeSessionIDState = OSAllocatedUnfairLock<UInt64?>(initialState: nil)
 
     // MARK: - Session watchdog (Task 9) — a session-scoped repeating CFRunLoopTimer, created and
     // invalidated ONLY on the tap thread (same thread that owns the session state above, so no lock
@@ -102,6 +114,39 @@ final class HotkeyManager {
     /// 见 `suspendedState` 的说明。幂等，重复调用安全。
     func setSuspended(_ suspended: Bool) {
         suspendedState.withLock { $0 = suspended }
+    }
+
+    /// UI（目前是点击 switcher 外部）请求取消时，统一终止 tap 线程里的 modal session，并通知
+    /// delegate 收起界面。
+    ///
+    /// 不能只让 Controller 清空列表：那样 `sessionActive` 会一直保持到 Cmd 松开，期间所有按键仍被
+    /// 吞掉，松开后还会额外派发一次 commit。这里先在主线程通过唯一的 delegate cancel 回调收起
+    /// UI，再把 tap 状态修改调度回拥有它的 run loop，不跨线程直接写。
+    func cancelActiveSession() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let runLoop = tapThreadRunLoop else { return }
+        guard let requestedSessionID = activeSessionIDState.withLock({ state -> UInt64? in
+            let id = state
+            state = nil
+            return id
+        }) else {
+            return
+        }
+        delegate?.hotkeyDidCancel()
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            guard let self,
+                  self.sessionActive,
+                  self.currentSessionID == requestedSessionID
+            else {
+                return
+            }
+            self.invalidateWatchdog()
+            self.sessionActive = false
+            self.currentTrigger = nil
+            self.currentChord = nil
+            self.currentSessionID = nil
+        }
+        CFRunLoopWakeUp(runLoop)
     }
 
     private func isSuspended() -> Bool {
@@ -334,6 +379,17 @@ final class HotkeyManager {
     private func dispatchSessionKeyDown(keyCode: UInt16, flags: UInt) {
         let shift = flags & UInt(CGEventFlags.maskShift.rawValue) != 0
 
+        if let direction = Self.groupWindowStepDirection(
+            currentTrigger: currentTrigger,
+            sessionChord: currentChord,
+            currentAppChord: snapshotChords().currentApp,
+            keyCode: keyCode,
+            flags: flags
+        ) {
+            dispatch { $0.hotkeyDidStepWithinGroup(backward: direction == .backward) }
+            return
+        }
+
         if keyCode == currentChord?.keyCode {
             dispatch { delegate in
                 shift ? delegate.hotkeyDidStepBackward() : delegate.hotkeyDidStepForward()
@@ -349,6 +405,8 @@ final class HotkeyManager {
             sessionActive = false
             currentTrigger = nil
             currentChord = nil
+            currentSessionID = nil
+            activeSessionIDState.withLock { $0 = nil }
             dispatch { $0.hotkeyDidCancel() }
         case kVK_Delete:
             dispatch { $0.hotkeyDidDeleteChar() }
@@ -367,6 +425,37 @@ final class HotkeyManager {
         }
     }
 
+    /// 全窗口 session 中再次按“当前 App 窗口”快捷键（默认 ⌘+`）时，不启动第二个 session，
+    /// 而是把它路由为所选聚合组内的窗口循环；Shift 变体按 macOS 惯例反向循环。
+    static func groupWindowStepDirection(
+        currentTrigger: HotkeyTrigger?,
+        sessionChord: Chord?,
+        currentAppChord: Chord,
+        keyCode: UInt16,
+        flags: UInt
+    ) -> GroupWindowStepDirection? {
+        guard currentTrigger == .allWindows, let sessionChord else { return nil }
+
+        // 全窗口快捷键可能含额外修饰键（例如 ⌥⌘Tab）。这些键在 session 存续期间必须继续按住，
+        // 因而组内切换应匹配「当前 App chord + session chord」的并集；否则默认 ⌘` 会因为仍按着
+        // ⌥ 而被误当成普通搜索字符。
+        let forwardChord = Chord(
+            keyCode: currentAppChord.keyCode,
+            modifiers: currentAppChord.modifiers | sessionChord.modifiers
+        )
+        if forwardChord.matches(keyCode: keyCode, flags: flags) {
+            return .forward
+        }
+
+        let shiftBit = UInt(CGEventFlags.maskShift.rawValue)
+        guard forwardChord.modifiers & shiftBit == 0 else { return nil }
+        let reverseChord = Chord(
+            keyCode: forwardChord.keyCode,
+            modifiers: forwardChord.modifiers | shiftBit
+        )
+        return reverseChord.matches(keyCode: keyCode, flags: flags) ? .backward : nil
+    }
+
     private func dispatch(_ call: @escaping (HotkeyManagerDelegate) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let delegate = self?.delegate else { return }
@@ -378,6 +467,9 @@ final class HotkeyManager {
         sessionActive = true
         currentTrigger = trigger
         currentChord = chord
+        nextSessionID &+= 1
+        currentSessionID = nextSessionID
+        activeSessionIDState.withLock { $0 = currentSessionID }
 
         if InputSafetyMonitor.isSecureInputEnabled {
             Self.logger.warning("secure input active — key events may be suppressed")
@@ -395,6 +487,8 @@ final class HotkeyManager {
         sessionActive = false
         currentTrigger = nil
         currentChord = nil
+        currentSessionID = nil
+        activeSessionIDState.withLock { $0 = nil }
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.hotkeyDidCommit()
         }

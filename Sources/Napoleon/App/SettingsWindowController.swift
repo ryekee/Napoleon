@@ -19,6 +19,8 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
     private static let contentWidth: CGFloat = 520
     /// 内容高度下限——短页面（关于）也不要缩成一条缝。
     private static let minContentHeight: CGFloat = 320
+    /// `ScrollView` 的理想高度与实际可视高度之间留一点余量，避免内容刚好贴边时每页都出现滚动条。
+    private static let contentHeightBreathingRoom: CGFloat = 20
     /// 与屏幕可用高度之间保留的余量：窗口不该顶满整个屏幕。
     private static let screenMargin: CGFloat = 120
 
@@ -202,7 +204,7 @@ final class SettingsWindowController: NSObject, NSToolbarDelegate, NSWindowDeleg
         // 「是否已随挂起的 SwiftUI 更新失效」不在文档保证之内，所以上面先 `layoutSubtreeIfNeeded()`
         // 强制冲刷一次。真出现没冲刷到的情况，最坏后果只是这一次按上一页的高度定尺寸（页面偏高或
         // 偏矮），下次切页即恢复——不会出错，也不会卡住。
-        let fitted = hostingView.fittingSize.height
+        let fitted = hostingView.fittingSize.height + Self.contentHeightBreathingRoom
         let height = min(max(fitted, Self.minContentHeight), maxContentHeight)
 
         let contentSize = NSSize(width: Self.contentWidth, height: height)

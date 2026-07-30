@@ -41,26 +41,26 @@ import QuartzCore
 /// flip stays. Any change to these frames has to be reasoned about bottom-up and verified
 /// visually; do not "fix" the arithmetic to match the prose.
 final class WindowCardLayer: CALayer {
+    /// 按 App 聚合时，正面缩略图后最多露出两层窗口预览，形成参考图中的卡片堆叠。
+    private let stackedThumbnailLayers = [CALayer(), CALayer()]
+    /// 与 App 图标 badge 相同的分层方式：外层只负责缩略图投影，内层负责圆角裁切与细描边。
+    private let thumbnailShadowLayer = CALayer()
     private let thumbnailContainer = CALayer()
     private let iconLayer = CALayer()
     private let thumbnailLayer = CALayer()
-    /// Badge 的投影层。必须与 `badgeLayer` 分开：一个 layer 的 `masksToBounds`（badge 要靠它
-    /// 把图标裁成圆角）会把**它自己**的投影一起裁掉，两个属性放同一层上互斥。所以外层只管投影
-    /// 不裁剪，内层只管裁剪不投影。
-    private let badgeShadowLayer = CALayer()
-    private let badgeLayer = CALayer()
+    /// 普通模式显示一个 App 图标；聚合模式按窗口数横向堆叠同一个 App 图标。每枚图标仍使用
+    /// 「外层投影 + 内层裁切」两层结构，避免 `masksToBounds` 把投影一起裁掉。
+    private var badgeShadowLayers: [CALayer] = []
+    private var badgeLayers: [CALayer] = []
     /// Primary label line — the owning app's name (larger, brighter than `titleLayer`).
     private let appNameLayer = CATextLayer()
     /// Secondary label line — the window's own title (smaller, dimmer; blank when the window has
     /// no title, no placeholder shown).
     private let titleLayer = CATextLayer()
-
     /// Tracks whether a real thumbnail has ever been shown on this card. `applyThumbnail` only
     /// plays the crossfade the first time a non-nil image arrives (icon → thumbnail); a later
     /// update to a fresher capture of the same window swaps in instantly, no repeated fade.
     private var currentThumbnail: CGImage?
-    private var isCardSelected = false
-
     /// Task 21：尺寸/明暗参数，由 `SwitcherView.render(...)` 建卡时注入（同一会话内所有卡片共用
     /// 同一份）。决定缩略图区尺寸、是否有第二行标题、以及全部配色。
     private let cardStyle: SwitcherStyle
@@ -102,23 +102,57 @@ final class WindowCardLayer: CALayer {
         isGeometryFlipped = true
         masksToBounds = false // selection glow (`shadowOpacity`) must be free to bleed outside bounds
         cornerRadius = SwitcherMetrics.cardCornerRadius
-        backgroundColor = cardStyle.normalCardBackground
+        backgroundColor = nil
         borderWidth = 0
         shadowColor = NSColor.controlAccentColor.cgColor
         shadowOffset = .zero
-        shadowRadius = 10
+        shadowRadius = 8
         shadowOpacity = 0
 
-        thumbnailContainer.frame = CGRect(
+        for (index, stackedLayer) in stackedThumbnailLayers.enumerated() {
+            // 先加远层再加近层，最后由正面 thumbnailContainer 覆盖；右上方露出少量边缘。
+            let offset = CGFloat(stackedThumbnailLayers.count - index) * 3
+            stackedLayer.frame = CGRect(
+                x: SwitcherMetrics.cardPadding + offset,
+                y: SwitcherMetrics.cardPadding + offset * 0.7,
+                width: cardStyle.thumbnailSize.width,
+                height: cardStyle.thumbnailSize.height
+            )
+            stackedLayer.cornerRadius = SwitcherMetrics.thumbnailCornerRadius
+            stackedLayer.masksToBounds = true
+            stackedLayer.contentsGravity = .resizeAspectFill
+            stackedLayer.backgroundColor = nil
+            stackedLayer.borderWidth = 0.5
+            stackedLayer.borderColor = cardStyle.badgeBorderColor
+            stackedLayer.isHidden = true
+            addSublayer(stackedLayer)
+        }
+
+        thumbnailShadowLayer.frame = CGRect(
             x: SwitcherMetrics.cardPadding,
             y: SwitcherMetrics.cardPadding,
             width: cardStyle.thumbnailSize.width,
             height: cardStyle.thumbnailSize.height
         )
+        thumbnailShadowLayer.shadowColor = NSColor.black.cgColor
+        thumbnailShadowLayer.shadowOpacity = cardStyle.thumbnailShadowOpacity
+        thumbnailShadowLayer.shadowRadius = 4
+        thumbnailShadowLayer.shadowOffset = CGSize(width: 0, height: 1)
+        thumbnailShadowLayer.shadowPath = CGPath(
+            roundedRect: CGRect(origin: .zero, size: cardStyle.thumbnailSize),
+            cornerWidth: SwitcherMetrics.thumbnailCornerRadius,
+            cornerHeight: SwitcherMetrics.thumbnailCornerRadius,
+            transform: nil
+        )
+        addSublayer(thumbnailShadowLayer)
+
+        thumbnailContainer.frame = thumbnailShadowLayer.bounds
         thumbnailContainer.masksToBounds = true
         thumbnailContainer.cornerRadius = SwitcherMetrics.thumbnailCornerRadius
-        thumbnailContainer.backgroundColor = cardStyle.thumbnailWellBackground
-        addSublayer(thumbnailContainer)
+        thumbnailContainer.backgroundColor = nil
+        thumbnailContainer.borderWidth = 0.75
+        thumbnailContainer.borderColor = cardStyle.thumbnailBorderColor
+        thumbnailShadowLayer.addSublayer(thumbnailContainer)
 
         // Icon placeholder: a centered square well inside the thumbnail box — shown until a real
         // capture arrives, and left in place underneath it afterwards (opacity 0) so the crossfade
@@ -143,45 +177,7 @@ final class WindowCardLayer: CALayer {
         thumbnailLayer.opacity = 0 // icon shows through until a real thumbnail arrives
         thumbnailContainer.addSublayer(thumbnailLayer)
 
-        // App-icon badge: horizontally centred, straddling the thumbnail's **visually lower**
-        // edge — ~3/4 sits over the thumbnail, ~1/4 hangs below it into the card's bottom
-        // padding. That overlap is what makes it read as a badge belonging to the thumbnail
-        // rather than a second, disconnected icon. Added as a sibling of `thumbnailContainer`
-        // (not its child) so the drop shadow and the overhang aren't clipped by
-        // `thumbnailContainer.masksToBounds`.
-        //
-        // `y` here is measured **upward from the card's bottom** — see the note on the
-        // coordinate system in the type's header doc. Hence the visual bottom of the thumbnail
-        // is at `y == cardPadding`, and subtracting a quarter of the badge drops it below.
-        let badgeSize = SwitcherMetrics.badgeSize
-        let badgeCorner = SwitcherMetrics.badgeCornerRadius
-        badgeShadowLayer.frame = CGRect(
-            x: SwitcherMetrics.cardPadding + (cardStyle.thumbnailSize.width - badgeSize) / 2,
-            y: SwitcherMetrics.cardPadding - badgeSize * 0.25,
-            width: badgeSize,
-            height: badgeSize
-        )
-        badgeShadowLayer.shadowColor = NSColor.black.cgColor
-        badgeShadowLayer.shadowOpacity = 0.5
-        badgeShadowLayer.shadowRadius = 3
-        badgeShadowLayer.shadowOffset = CGSize(width: 0, height: 1)
-        // 形状是已知的圆角矩形，直接给 `shadowPath`：省掉 Core Animation 每帧从 alpha 通道推
-        // 投影轮廓的开销，这里是每张卡片都要走的热路径。
-        badgeShadowLayer.shadowPath = CGPath(
-            roundedRect: CGRect(origin: .zero, size: CGSize(width: badgeSize, height: badgeSize)),
-            cornerWidth: badgeCorner, cornerHeight: badgeCorner, transform: nil
-        )
-        addSublayer(badgeShadowLayer)
-
-        // 内层填满外层，只负责把图标裁成圆角；投影归外层管（见 `badgeShadowLayer` 的注释）。
-        badgeLayer.frame = CGRect(origin: .zero, size: CGSize(width: badgeSize, height: badgeSize))
-        badgeLayer.cornerRadius = badgeCorner
-        badgeLayer.masksToBounds = true
-        badgeLayer.backgroundColor = cardStyle.badgeBackground
-        badgeLayer.borderWidth = 1
-        badgeLayer.borderColor = cardStyle.badgeBorderColor
-        badgeLayer.contentsGravity = .resizeAspect
-        badgeShadowLayer.addSublayer(badgeLayer)
+        updateBadgeStack(count: 1, icon: nil, contentsScale: 1)
 
         let labelWidth = cardStyle.cardSize.width - SwitcherMetrics.cardPadding * 2
 
@@ -229,8 +225,19 @@ final class WindowCardLayer: CALayer {
     /// automatically — see `OverlayPanel.present`), a manually-built `CALayer` tree like this one
     /// does not inherit `contentsScale` down from its superlayer, so each hand-added sublayer
     /// needs it set directly to stay crisp on whichever screen the switcher is currently shown on.
-    func update(appName: String, title: String, icon: NSImage?, thumbnail: CGImage?, isSelected: Bool, contentsScale: CGFloat) {
-        for sublayer: CALayer in [self, thumbnailContainer, iconLayer, thumbnailLayer, badgeShadowLayer, badgeLayer, appNameLayer, titleLayer] {
+    func update(
+        appName: String,
+        title: String,
+        icon: NSImage?,
+        thumbnail: CGImage?,
+        stackedThumbnails: [CGImage?],
+        groupCount: Int,
+        contentsScale: CGFloat
+    ) {
+        let fixedLayers: [CALayer] = [
+            self, thumbnailShadowLayer, thumbnailContainer, iconLayer, thumbnailLayer, appNameLayer, titleLayer
+        ]
+        for sublayer in fixedLayers + stackedThumbnailLayers {
             sublayer.contentsScale = contentsScale
         }
 
@@ -240,19 +247,148 @@ final class WindowCardLayer: CALayer {
             titleLayer.string = title
         }
         iconLayer.contents = icon
-        badgeLayer.contents = icon
+
+        for (index, stackedLayer) in stackedThumbnailLayers.enumerated() {
+            guard index < stackedThumbnails.count, let stackedThumbnail = stackedThumbnails[index] else {
+                stackedLayer.isHidden = true
+                stackedLayer.contents = nil
+                continue
+            }
+            let offset = CGFloat(stackedThumbnailLayers.count - index) * 3
+            stackedLayer.frame = fittedThumbnailFrame(for: stackedThumbnail).offsetBy(
+                dx: offset,
+                dy: offset * 0.7
+            )
+            stackedLayer.isHidden = false
+            stackedLayer.contents = stackedThumbnail
+        }
 
         if let thumbnail {
             applyThumbnail(thumbnail)
         }
+        updateBadgeStack(count: groupCount, icon: icon, contentsScale: contentsScale)
+    }
 
-        setSelected(isSelected)
+    private func makeBadgeLayers() {
+        let badgeSize = SwitcherMetrics.badgeSize
+        let badgeCorner = SwitcherMetrics.badgeCornerRadius
+        let badgeBounds = CGRect(origin: .zero, size: CGSize(width: badgeSize, height: badgeSize))
+
+        let shadowLayer = CALayer()
+        shadowLayer.shadowColor = NSColor.black.cgColor
+        shadowLayer.shadowOpacity = 0.5
+        shadowLayer.shadowRadius = 3
+        shadowLayer.shadowOffset = CGSize(width: 0, height: 1)
+        shadowLayer.shadowPath = CGPath(
+            roundedRect: badgeBounds,
+            cornerWidth: badgeCorner,
+            cornerHeight: badgeCorner,
+            transform: nil
+        )
+        addSublayer(shadowLayer)
+
+        let badgeLayer = CALayer()
+        badgeLayer.frame = badgeBounds
+        badgeLayer.cornerRadius = badgeCorner
+        badgeLayer.masksToBounds = true
+        badgeLayer.backgroundColor = cardStyle.badgeBackground
+        badgeLayer.borderWidth = 1
+        badgeLayer.borderColor = cardStyle.badgeBorderColor
+        badgeLayer.contentsGravity = .resizeAspect
+        shadowLayer.addSublayer(badgeLayer)
+
+        badgeShadowLayers.append(shadowLayer)
+        badgeLayers.append(badgeLayer)
+    }
+
+    /// 图标堆叠始终整体水平居中；数量较多时自动增加重叠量，保证每扇聚合窗口仍对应一枚图标，
+    /// 且不会撑出缩略图区。
+    private func updateBadgeStack(count: Int, icon: NSImage?, contentsScale: CGFloat) {
+        let badgeCount = max(1, count)
+        while badgeShadowLayers.count < badgeCount {
+            makeBadgeLayers()
+        }
+        while badgeShadowLayers.count > badgeCount {
+            badgeShadowLayers.removeLast().removeFromSuperlayer()
+            badgeLayers.removeLast()
+        }
+
+        let badgeSize = SwitcherMetrics.badgeSize
+        let maxStackWidth = max(badgeSize, cardStyle.thumbnailSize.width - 16)
+        let step = badgeCount > 1
+            ? min(badgeSize * 0.58, (maxStackWidth - badgeSize) / CGFloat(badgeCount - 1))
+            : 0
+        let stackWidth = badgeSize + step * CGFloat(badgeCount - 1)
+        let startX = SwitcherMetrics.cardPadding + (cardStyle.thumbnailSize.width - stackWidth) / 2
+        let y = SwitcherMetrics.cardPadding - badgeSize * 0.25
+
+        for index in badgeShadowLayers.indices {
+            let shadowLayer = badgeShadowLayers[index]
+            let badgeLayer = badgeLayers[index]
+            shadowLayer.frame = CGRect(
+                x: startX + CGFloat(index) * step,
+                y: y,
+                width: badgeSize,
+                height: badgeSize
+            )
+            shadowLayer.contentsScale = contentsScale
+            badgeLayer.contentsScale = contentsScale
+            badgeLayer.contents = icon
+        }
+    }
+
+    /// `thumbnailSize` 是每张卡片可使用的最大区域，不等于截图本身的显示边界。窄窗口会在
+    /// 该区域内等比居中；描边和投影必须跟随这个实际 frame，不能继续包住整个最大区域。
+    private func fittedThumbnailFrame(for image: CGImage) -> CGRect {
+        let availableSize = cardStyle.thumbnailSize
+        guard image.width > 0, image.height > 0 else {
+            return CGRect(origin: CGPoint(x: SwitcherMetrics.cardPadding, y: SwitcherMetrics.cardPadding), size: availableSize)
+        }
+
+        let imageSize = CGSize(width: CGFloat(image.width), height: CGFloat(image.height))
+        let scale = min(availableSize.width / imageSize.width, availableSize.height / imageSize.height)
+        let fittedSize = CGSize(
+            width: imageSize.width * scale,
+            height: imageSize.height * scale
+        )
+        return CGRect(
+            x: SwitcherMetrics.cardPadding + (availableSize.width - fittedSize.width) / 2,
+            y: SwitcherMetrics.cardPadding + (availableSize.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+    }
+
+    private func updateThumbnailGeometry(for image: CGImage) {
+        let fittedFrame = fittedThumbnailFrame(for: image)
+        let fittedBounds = CGRect(origin: .zero, size: fittedFrame.size)
+        let iconSize = max(24, min(48, min(fittedFrame.width, fittedFrame.height) * 0.48))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        thumbnailShadowLayer.frame = fittedFrame
+        thumbnailShadowLayer.shadowPath = CGPath(
+            roundedRect: fittedBounds,
+            cornerWidth: SwitcherMetrics.thumbnailCornerRadius,
+            cornerHeight: SwitcherMetrics.thumbnailCornerRadius,
+            transform: nil
+        )
+        thumbnailContainer.frame = fittedBounds
+        thumbnailLayer.frame = fittedBounds
+        iconLayer.frame = CGRect(
+            x: (fittedFrame.width - iconSize) / 2,
+            y: (fittedFrame.height - iconSize) / 2,
+            width: iconSize,
+            height: iconSize
+        )
+        CATransaction.commit()
     }
 
     private func applyThumbnail(_ image: CGImage) {
         guard currentThumbnail !== image else { return }
         let isFirstAppearance = currentThumbnail == nil
         currentThumbnail = image
+        updateThumbnailGeometry(for: image)
 
         CATransaction.begin()
         if isFirstAppearance {
@@ -271,29 +407,4 @@ final class WindowCardLayer: CALayer {
         CATransaction.commit()
     }
 
-    private func setSelected(_ selected: Bool) {
-        // Read live rather than cached, and do it on *every* call (not just on a selection-state
-        // transition below): must track whatever accent color is current in System Settings, which
-        // can change while this card stays selected across several `render()` calls in the same
-        // session. `setDisableActions` keeps this a hard set — no implicit fade for a same-value
-        // re-assignment on every unrelated render.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        let accent = NSColor.controlAccentColor.cgColor
-        borderColor = accent
-        shadowColor = accent
-        CATransaction.commit()
-
-        guard selected != isCardSelected else { return }
-        isCardSelected = selected
-
-        CATransaction.begin()
-        backgroundColor = selected ? cardStyle.selectedCardBackground : cardStyle.normalCardBackground
-        borderWidth = selected ? 2 : 0
-        shadowOpacity = selected ? 0.5 : 0
-        transform = selected
-            ? CATransform3DMakeScale(SwitcherMetrics.selectedScale, SwitcherMetrics.selectedScale, 1)
-            : CATransform3DIdentity
-        CATransaction.commit()
-    }
 }

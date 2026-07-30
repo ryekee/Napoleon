@@ -15,6 +15,8 @@ the overlay only appears if you hold the hotkey long enough to want it.
   whole point of the project.
 - **Two hotkeys.** ⌘Tab cycles every window, ⌘\` cycles windows of the current app. Both are
   rebindable.
+- **Window or app switching.** Keep every window separate, or group windows by application and
+  use ⌘\` to move within the selected app's stack.
 - **Quick-switch stays quick.** Tap and release faster than the display delay and Napoleon
   switches straight to your previous window without flashing an overlay.
 - **Search.** Start typing to filter by app name or window title. Chinese titles can be matched
@@ -133,7 +135,7 @@ these questions, and it does mean Napoleon is not App Store material.
 
 ## Status
 
-Early but usable daily. Version 0.1.0. Known rough edges:
+Early but usable daily. Version 0.2.0. Known rough edges:
 
 - Windows on another Space that Accessibility can't reach are focused at app level, so a
   multi-window app may not land on the exact window you picked.

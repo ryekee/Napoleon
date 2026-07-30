@@ -25,8 +25,23 @@ import Testing
         #expect(WindowFilter.search([m], query: "gouwu").map(\.id) == [1])
     }
 
+    @Test func searchMatchesLocalizedAppNameByPinyin() {
+        // 中文系统下 Finder 的 localizedName 是“访达”；只给窗口标题做拼音会让 `f` 搜不到它。
+        let finder = WindowInfo(
+            id: 1,
+            pid: 1,
+            appName: "访达",
+            appBundleID: "com.apple.finder",
+            title: "下载",
+            pinyinAppName: "fang da",
+            pinyinTitle: "xia zai"
+        )
+        #expect(WindowFilter.search([finder], query: "f").map(\.id) == [1])
+        #expect(WindowFilter.search([finder], query: "fang").map(\.id) == [1])
+    }
+
     @Test func searchIgnoresPinyinWhenDisabled() {
-        // 设置项「拼音匹配中文标题」关掉后拼音不参与匹配——但 App 名/标题本身照常能搜。
+        // 设置项「拼音匹配中文名称」关掉后拼音不参与匹配——但 App 名/标题本身照常能搜。
         let m = WindowInfo(id: 1, pid: 1, appName: "备忘录", appBundleID: nil, title: "购物清单", pinyinTitle: "gouwu qingdan")
         #expect(WindowFilter.search([m], query: "gouwu", includePinyin: false).isEmpty)
         #expect(WindowFilter.search([m], query: "购物", includePinyin: false).map(\.id) == [1])

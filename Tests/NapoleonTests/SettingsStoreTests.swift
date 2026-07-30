@@ -44,11 +44,35 @@ import Foundation
         #expect(store.showDelayMs == 100)
         #expect(store.thumbnailMaxCacheBytes == 32 * 1024 * 1024)
         #expect(store.pinyinSearchEnabled == true)
+        #expect(store.groupWindowsByApplication == false)
         // Task 21 新增项的默认值：显示窗口标题（用户要求默认开）、中等卡片、不跟随系统明暗
         // （= 始终深色，保持 Phase 5 起验证过的观感）。
         #expect(store.showWindowTitle == true)
         #expect(store.cardSize == .medium)
         #expect(store.followSystemAppearance == false)
+    }
+
+    @Test func resetsAndPersistsBothHotkeysToDefaults() {
+        let (defaults, name) = makeSuite()
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        let store = SettingsStore(defaults: defaults)
+        store.allWindowsChord = Chord(
+            keyCode: 49,
+            modifiers: UInt(CGEventFlags([.maskCommand, .maskAlternate]).rawValue)
+        )
+        store.currentAppChord = Chord(
+            keyCode: 50,
+            modifiers: UInt(CGEventFlags([.maskControl, .maskAlternate]).rawValue)
+        )
+
+        #expect(store.hotkeysAreDefault == false)
+        store.resetHotkeysToDefaults()
+        #expect(store.hotkeysAreDefault == true)
+
+        let reloaded = SettingsStore(defaults: defaults)
+        #expect(reloaded.allWindowsChord == SettingsStore.defaultAllWindowsChord)
+        #expect(reloaded.currentAppChord == SettingsStore.defaultCurrentAppChord)
     }
 
     @Test func persistsShowWindowTitleAndCardSizeAcrossInstances() {
@@ -59,11 +83,13 @@ import Foundation
         store1.showWindowTitle = false
         store1.cardSize = .large
         store1.followSystemAppearance = true
+        store1.groupWindowsByApplication = true
 
         let store2 = SettingsStore(defaults: defaults)
         #expect(store2.showWindowTitle == false)
         #expect(store2.cardSize == .large)
         #expect(store2.followSystemAppearance == true)
+        #expect(store2.groupWindowsByApplication == true)
     }
 
     @Test func unknownPersistedCardSizeFallsBackToDefault() {

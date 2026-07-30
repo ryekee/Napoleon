@@ -49,6 +49,9 @@ final class WindowEnumerator: Sendable {
     /// 全量枚举。后台并发执行，返回窗口列表 + AXUIElement 句柄映射（按 WindowID）。
     func enumerateAll() async -> (windows: [WindowInfo], handles: [WindowID: AXUIElement]) {
         let snapshots = Self.snapshotRunningApplications()
+        // AX subrole 不足以识别 Electron/Chromium 的无边框浮动窗；一次性读取窗口服务器 layer，
+        // 后续所有 App 子任务复用同一快照，避免每扇窗口各做一次 CG 查询。
+        let switchableWindowIDs = WindowLayerFilter.currentSwitchableWindowIDs()
 
         var windows: [WindowInfo] = []
         var handles: [WindowID: AXUIElement] = [:]
@@ -60,7 +63,7 @@ final class WindowEnumerator: Sendable {
         await withTaskGroup(of: AppEnumerationResult.self) { group in
             for snapshot in snapshots {
                 group.addTask {
-                    self.enumerateWindows(of: snapshot)
+                    self.enumerateWindows(of: snapshot, switchableWindowIDs: switchableWindowIDs)
                 }
             }
 
@@ -114,7 +117,10 @@ final class WindowEnumerator: Sendable {
     /// 单个 App 的枚举——这里发生的每一次 `AXUIElementCopyAttributeValue` 都是同步
     /// mach IPC，是唯一真正的「卡死点」，所以靠 `AXUIElementSetMessagingTimeout`
     /// 兜底；这层本身不额外套超时/重试，交给 messaging timeout 的语义处理。
-    private func enumerateWindows(of app: AppSnapshot) -> AppEnumerationResult {
+    private func enumerateWindows(
+        of app: AppSnapshot,
+        switchableWindowIDs: Set<WindowID>?
+    ) -> AppEnumerationResult {
         let axApp = AXUIElementCreateApplication(app.pid)
         AXUIElementSetMessagingTimeout(axApp, 0.5)
 
@@ -133,7 +139,8 @@ final class WindowEnumerator: Sendable {
                 pid: app.pid,
                 appName: app.appName,
                 appBundleID: app.appBundleID,
-                isHiddenApp: app.isHiddenApp
+                isHiddenApp: app.isHiddenApp,
+                switchableWindowIDs: switchableWindowIDs
             ) else {
                 continue
             }
@@ -156,7 +163,8 @@ final class WindowEnumerator: Sendable {
         pid: ProcessID,
         appName: String,
         appBundleID: String?,
-        isHiddenApp: Bool
+        isHiddenApp: Bool,
+        switchableWindowIDs: Set<WindowID>? = WindowLayerFilter.currentSwitchableWindowIDs()
     ) -> (info: WindowInfo, id: WindowID, element: AXUIElement)? {
         // subrole 过滤：只收标准窗口 + 对话框，其余（面板、气泡、装饰窗等）跳过。
         let subrole = Self.stringAttribute(element, kAXSubroleAttribute)
@@ -194,6 +202,16 @@ final class WindowEnumerator: Sendable {
             return nil
         }
 
+        // fail-open：只有成功取得窗口服务器快照时才应用 layer 过滤。标准窗口是 layer 0；
+        // NSPanel/浮动 Pet 一类通常是 layer 3，即使 AX 报 AXStandardWindow 也会在这里被排除。
+        if let switchableWindowIDs, !switchableWindowIDs.contains(windowID) {
+            Self.logger.info(
+                "dropping non-standard-layer window id=\(windowID, privacy: .public) pid=\(pid, privacy: .public)"
+            )
+            return nil
+        }
+
+        let pinyinAppName: String? = pinyinEnabled ? PinyinTransformer.pinyin(for: appName) : nil
         let pinyinTitle: String? = pinyinEnabled ? PinyinTransformer.pinyin(for: title) : nil
 
         let info = WindowInfo(
@@ -205,6 +223,7 @@ final class WindowEnumerator: Sendable {
             isMinimized: isMinimized,
             isHiddenApp: isHiddenApp,
             isOnCurrentSpace: true, // Spike 2 确认：AX 只能枚举到当前 Space 的窗口
+            pinyinAppName: pinyinAppName,
             pinyinTitle: pinyinTitle
         )
         return (info, windowID, element)

@@ -63,7 +63,8 @@ final class AppServices {
             windowStore: windowStore,
             thumbnails: thumbnails,
             settings: settings,
-            overlay: overlay
+            overlay: overlay,
+            cancelHotkeySession: { [hotkey] in hotkey.cancelActiveSession() }
         )
     }
 

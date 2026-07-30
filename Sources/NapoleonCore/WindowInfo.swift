@@ -10,6 +10,9 @@ public struct WindowInfo: Identifiable, Equatable, Sendable {
     public var isMinimized: Bool
     public var isHiddenApp: Bool
     public var isOnCurrentSpace: Bool
+    /// 本地化 App 名的拼音。中文系统下 Finder 的 `localizedName` 是“访达”，搜索 `f`
+    /// 需要靠这一份别名命中；它与窗口标题拼音分开保存，标题变化时不会把 App 名别名冲掉。
+    public var pinyinAppName: String?
     public var pinyinTitle: String?
     /// Task X4：该窗口是否位于一个全屏 Space（type==4，见 `SpaceClassifier`）。默认 `false`——
     /// AX 枚举的当前 Space 窗口不关心这个字段（它们本来就靠 `isOnCurrentSpace` 保证可见）；
@@ -18,7 +21,8 @@ public struct WindowInfo: Identifiable, Equatable, Sendable {
     public var isFullscreen: Bool
 
     public init(id: WindowID, pid: ProcessID, appName: String, appBundleID: String?, title: String,
-                isMinimized: Bool = false, isHiddenApp: Bool = false, isOnCurrentSpace: Bool = true, pinyinTitle: String? = nil,
+                isMinimized: Bool = false, isHiddenApp: Bool = false, isOnCurrentSpace: Bool = true,
+                pinyinAppName: String? = nil, pinyinTitle: String? = nil,
                 isFullscreen: Bool = false) {
         self.id = id
         self.pid = pid
@@ -28,17 +32,19 @@ public struct WindowInfo: Identifiable, Equatable, Sendable {
         self.isMinimized = isMinimized
         self.isHiddenApp = isHiddenApp
         self.isOnCurrentSpace = isOnCurrentSpace
+        self.pinyinAppName = pinyinAppName
         self.pinyinTitle = pinyinTitle
         self.isFullscreen = isFullscreen
     }
 
     public var searchHaystack: String {
-        [appName, title, pinyinTitle ?? ""].joined(separator: " ").lowercased()
+        [appName, title, pinyinAppName ?? "", pinyinTitle ?? ""].joined(separator: " ").lowercased()
     }
 
-    /// 不含拼音的匹配串——用户在设置里关掉「拼音匹配中文标题」时用这个（见
+    /// 不含拼音的匹配串——用户在设置里关掉「拼音匹配中文名称」时用这个（见
     /// `WindowFilter.search(_:query:includePinyin:)`）。拼音仍然照常在枚举时生成并保存在
-    /// `pinyinTitle` 里，只是搜索时不参与匹配：开关因此**立即生效**，不需要重新枚举全部窗口。
+    /// `pinyinAppName` / `pinyinTitle` 里，只是搜索时不参与匹配：开关因此**立即生效**，
+    /// 不需要重新枚举全部窗口。
     public var searchHaystackWithoutPinyin: String {
         [appName, title].joined(separator: " ").lowercased()
     }

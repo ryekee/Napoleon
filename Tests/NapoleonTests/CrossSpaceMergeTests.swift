@@ -49,7 +49,7 @@ import NapoleonCore
         #expect(additions.allSatisfy { $0.isOnCurrentSpace == false })
         #expect(additions.allSatisfy { $0.isMinimized == false })
         #expect(hiddenCalls == [100, 100])
-        #expect(pinyinCalls == ["Title", "Title"])
+        #expect(pinyinCalls == ["App100", "Title", "App100", "Title"])
     }
 
     @Test func invokesInjectedClosuresWithTheirResults() {
@@ -64,6 +64,7 @@ import NapoleonCore
 
         #expect(additions.count == 1)
         #expect(additions[0].isHiddenApp == true)
+        #expect(additions[0].pinyinAppName == "gou wu qing dan")
         #expect(additions[0].pinyinTitle == "gou wu qing dan")
         #expect(additions[0].pid == 200)
         #expect(additions[0].isOnCurrentSpace == false)

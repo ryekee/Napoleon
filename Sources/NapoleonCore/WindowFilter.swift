@@ -60,9 +60,10 @@ public enum WindowFilter {
         }
     }
 
-    /// - Parameter includePinyin: 是否让拼音参与匹配（设置项「拼音匹配中文标题」，默认开）。
-    ///   关掉时只按 App 名 + 窗口标题匹配——拼音仍在枚举时生成好放在 `WindowInfo.pinyinTitle`
-    ///   里，这里只是不看它，所以开关**下一次按键就生效**，不需要重新枚举窗口。
+    /// - Parameter includePinyin: 是否让拼音参与匹配（设置项「拼音匹配中文名称」，默认开）。
+    ///   关掉时只按 App 名 + 窗口标题匹配——拼音仍在枚举时生成好放在
+    ///   `WindowInfo.pinyinAppName` / `pinyinTitle` 里，这里只是不看它，所以开关**下一次按键
+    ///   就生效**，不需要重新枚举窗口。
     public static func search(_ windows: [WindowInfo], query: String, includePinyin: Bool = true) -> [WindowInfo] {
         if query.isEmpty {
             return windows

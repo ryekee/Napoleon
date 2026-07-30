@@ -25,6 +25,12 @@ import AppKit
 /// 视觉连续性（Task 18 的内容视图淡入/高亮态过渡）。
 @MainActor
 final class OverlayPanel: NSPanel {
+    /// 鼠标在面板 frame 外按下时触发。Controller 用它取消本次切换，不聚焦任何候选窗口。
+    var onClickOutside: (() -> Void)?
+
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
+
     init() {
         super.init(
             contentRect: .zero,
@@ -70,12 +76,51 @@ final class OverlayPanel: NSPanel {
         contentView?.wantsLayer = true
         contentView?.layer?.contentsScale = screen.backingScaleFactor
 
+        startOutsideClickMonitoring()
         orderFrontRegardless()
     }
 
     /// 隐藏浮层。面板本身不销毁，供下次 `present` 复用。
     func dismiss() {
+        stopOutsideClickMonitoring()
         orderOut(nil)
+    }
+
+    /// 同时安装 global + local monitor：
+    /// - global 覆盖点到其它 App / 桌面；
+    /// - local 覆盖点到 Napoleon 自己的设置窗等区域。
+    /// 两条路径都按全局坐标与 panel frame 比较，面板内的卡片和快捷切换按钮不受影响。
+    private func startOutsideClickMonitoring() {
+        guard globalMouseMonitor == nil, localMouseMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cancelIfMouseIsOutside()
+            }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.cancelIfMouseIsOutside()
+            }
+            return event
+        }
+    }
+
+    private func stopOutsideClickMonitoring() {
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
+        }
+    }
+
+    private func cancelIfMouseIsOutside() {
+        guard isVisible, !frame.contains(NSEvent.mouseLocation) else { return }
+        onClickOutside?()
     }
 
     /// 鼠标当前所在的 `NSScreen`——遍历 `NSScreen.screens` 找 `frame` 包含

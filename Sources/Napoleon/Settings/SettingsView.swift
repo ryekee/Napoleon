@@ -75,6 +75,13 @@ struct SettingsView: View {
                 Text("Click, then press a new combination. It must include ⌘/⌃/⌥. Press Esc to cancel.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Restore Defaults") {
+                        settings.resetHotkeysToDefaults()
+                    }
+                    .disabled(settings.hotkeysAreDefault)
+                }
             }
             // 绑定改变后立刻推给运行中的事件 tap（持久化由 SettingsStore 自己完成）。
             .onChange(of: settings.allWindowsChord) { AppServices.shared.applyChords() }
@@ -99,8 +106,8 @@ struct SettingsView: View {
             }
 
             Section("Search") {
-                Toggle("Match Chinese titles by Pinyin", isOn: $settings.pinyinSearchEnabled)
-                Text("Find Chinese window titles by typing Pinyin — “gouwu” matches “购物清单”.")
+                Toggle("Match Chinese names by Pinyin", isOn: $settings.pinyinSearchEnabled)
+                Text("Find localized app and window names by typing Pinyin — “f” matches “访达”.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -154,6 +161,11 @@ struct SettingsView: View {
     private var appearanceTab: some View {
         Form {
             Section("Overlay") {
+                Toggle("Group windows by application", isOn: $settings.groupWindowsByApplication)
+                Text("Applies to the all-windows switcher. The current-app shortcut always lists individual windows.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Picker("Card size", selection: $settings.cardSize) {
                     ForEach(CardSizeOption.allCases) { option in
                         Text(option.displayName).tag(option)

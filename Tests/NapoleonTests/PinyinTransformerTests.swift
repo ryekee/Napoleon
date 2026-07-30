@@ -18,4 +18,10 @@ import Testing
     @Test func nonChineseTextReturnsNil() {
         #expect(PinyinTransformer.pinyin(for: "Safari") == nil)
     }
+
+    @Test func localizedFinderNameProducesSearchableInitial() throws {
+        let result = try #require(PinyinTransformer.pinyin(for: "访达"))
+        #expect(result.contains("fang"))
+        #expect(result.hasPrefix("f"))
+    }
 }

@@ -10,7 +10,7 @@ import os
 /// `NapoleonApp.swift` 里全部 TEMP 接线。
 ///
 /// **修的三个真机 bug**：
-/// 1. `commitFocus()` 聚焦 `ordered[selection.index]`——真实选中项，不再是固定的 `MRU[1]`。
+/// 1. `commitFocus()` 聚焦 `items[selection.index].primary`——真实选中项，不再是固定的 `MRU[1]`。
 /// 2. 有 AX 句柄（当前 Space）走 `WindowFocuser.focus`；没有句柄（跨 Space/全屏）走
 ///    `WindowFocuser.focusApp(pid:)`。
 /// 3. 显示范围默认「当前 Space + 全屏」（`SettingsStore.includeOtherSpaces` 默认 `false`，桌面
@@ -48,6 +48,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     private let thumbnails: ThumbnailService
     private let settings: SettingsStore
     private let overlay: OverlayPanel
+    private let cancelHotkeySession: () -> Void
 
     // MARK: - Session state（一次 trigger→commit/cancel 有效，见类型头注释）
 
@@ -56,8 +57,18 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// 基线重新过滤，而不是对上一次搜索的结果再过滤（否则退格键删不回之前被滤掉的窗口）。
     private var baseFiltered: [WindowInfo] = []
     /// 当前实际显示/参与聚焦判定的列表——trigger 时等于 `baseFiltered`，搜索时替换成
-    /// `WindowFilter.search` 的结果，`commitFocus()`/渲染/方向键都读这份。
+    /// `WindowFilter.search` 的结果。逐窗口/按 App 聚合都以它为输入。
     private var ordered: [WindowInfo] = []
+    /// 真正显示和参与选中索引的卡片项。它始终由 `ordered` 和当前聚合设置派生，避免搜索、
+    /// 快速切换聚合方式时维护两份列表而发生漂移。
+    private var items: [SwitcherItem] {
+        let result = SwitcherItem.make(from: ordered, groupByApplication: isApplicationGroupingActive)
+        guard isApplicationGroupingActive else { return result }
+        return result.map { item in
+            guard let selectedWindowID = groupPrimaryWindowIDs[item.id] else { return item }
+            return item.selectingWindow(id: selectedWindowID)
+        }
+    }
     private var handles: [WindowID: AXUIElement] = [:]
     private var query = ""
     /// 最近一次 `render(...)` 返回的列数，`hotkeyDidMove` 的 `moveInGrid` 要用；
@@ -65,6 +76,9 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// （dy 上下移动等价于 next/previous，dx 无效果），不会因为列数未知而崩或乱跳。
     private var columns = 1
     private var selection = SelectionModel(count: 0)
+    /// 每个聚合卡片当前放到正面的窗口。key 是组内 MRU 第一扇窗口（稳定卡片 id），value 是
+    /// 用户在该组里用 ⌘+` 选中的窗口；松开 Cmd 时 `commitFocus()` 聚焦这个 primary。
+    private var groupPrimaryWindowIDs: [WindowID: WindowID] = [:]
     /// 每次会话新建一个实例（不像 `overlay` 跨会话复用）——`SwitcherView` 内部按 WindowID
     /// 复用的 `WindowCardLayer` 池只需要在同一次会话内维持缩略图淡入状态。
     private var switcherView: SwitcherView?
@@ -81,11 +95,21 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// dismiss 的面板意外重新 present 出来。
     private var sessionToken = 0
 
-    init(windowStore: WindowStore, thumbnails: ThumbnailService, settings: SettingsStore, overlay: OverlayPanel) {
+    init(
+        windowStore: WindowStore,
+        thumbnails: ThumbnailService,
+        settings: SettingsStore,
+        overlay: OverlayPanel,
+        cancelHotkeySession: @escaping () -> Void
+    ) {
         self.windowStore = windowStore
         self.thumbnails = thumbnails
         self.settings = settings
         self.overlay = overlay
+        self.cancelHotkeySession = cancelHotkeySession
+        overlay.onClickOutside = { [weak self] in
+            self?.handleOutsideClick()
+        }
     }
 
     // MARK: - HotkeyManagerDelegate
@@ -100,6 +124,10 @@ final class SwitcherController: HotkeyManagerDelegate {
 
     nonisolated func hotkeyDidStepBackward() {
         MainActor.assumeIsolated { self.handleStepBackward() }
+    }
+
+    nonisolated func hotkeyDidStepWithinGroup(backward: Bool) {
+        MainActor.assumeIsolated { self.handleStepWithinGroup(backward: backward) }
     }
 
     nonisolated func hotkeyDidReceiveChar(_ s: String) {
@@ -155,7 +183,8 @@ final class SwitcherController: HotkeyManagerDelegate {
         columns = 1
         shown = false
         switcherView = nil
-        selection = SelectionModel(count: filtered.count, initial: filtered.count > 1 ? 1 : 0)
+        groupPrimaryWindowIDs = [:]
+        selection = SelectionModel(count: items.count, initial: items.count > 1 ? 1 : 0)
 
         Self.logger.info("trigger: \(filtered.count, privacy: .public) windows, mode=\(String(describing: trigger), privacy: .public)")
 
@@ -188,12 +217,17 @@ final class SwitcherController: HotkeyManagerDelegate {
             self.selection.select(index)
             self.finishSession(focus: true)
         }
+        view.onToggleGrouping = { [weak self] in
+            self?.toggleApplicationGrouping()
+        }
         switcherView = view
 
         let (cols, size) = view.render(
-            windows: ordered,
+            items: items,
             selected: selection.index,
             query: query,
+            groupingByApplication: isApplicationGroupingActive,
+            showsGroupingToggle: mode == .allWindows,
             iconProvider: Self.icon(for:),
             thumbnailProvider: { [thumbnails] id in thumbnails.cached(id) }
         )
@@ -205,16 +239,18 @@ final class SwitcherController: HotkeyManagerDelegate {
         fetchThumbnails(for: ordered, token: sessionToken, captureSize: thumbnailCaptureSize(for: style))
     }
 
-    /// 用当前 `ordered`/`selection` 重新渲染并重新居中面板——内容/尺寸变了（搜索/方向键/
+    /// 用当前 `items`/`selection` 重新渲染并重新居中面板——内容/尺寸变了（搜索/方向键/
     /// hover/缩略图到达）都要走这条路径。面板还没显示过（`switcherView == nil`）时是 no-op，
     /// 这也是 `fetchThumbnails` 里过期抓图结果不会意外把已 dismiss 的面板重新弹出来的关键
     /// 一环（`resetSessionState()`/`handleTrigger` 都会把 `switcherView` 置 `nil`）。
     private func rerender() {
         guard let view = switcherView else { return }
         let (cols, size) = view.render(
-            windows: ordered,
+            items: items,
             selected: selection.index,
             query: query,
+            groupingByApplication: isApplicationGroupingActive,
+            showsGroupingToggle: mode == .allWindows,
             iconProvider: Self.icon(for:),
             thumbnailProvider: { [thumbnails] id in thumbnails.cached(id) }
         )
@@ -229,6 +265,19 @@ final class SwitcherController: HotkeyManagerDelegate {
 
     private func handleStepBackward() {
         selection.previous()
+        if shown { rerender() }
+    }
+
+    private func handleStepWithinGroup(backward: Bool) {
+        guard isApplicationGroupingActive else { return }
+        let currentItems = items
+        guard currentItems.indices.contains(selection.index) else { return }
+
+        let current = currentItems[selection.index]
+        let next = current.steppingPrimary(backward: backward)
+        guard next.primary.id != current.primary.id else { return }
+
+        groupPrimaryWindowIDs[current.id] = next.primary.id
         if shown { rerender() }
     }
 
@@ -265,8 +314,33 @@ final class SwitcherController: HotkeyManagerDelegate {
         // 拼音是否参与匹配现读设置——开关下一次按键即生效（见 `WindowFilter.search`）。
         let results = WindowFilter.search(baseFiltered, query: query, includePinyin: settings.pinyinSearchEnabled)
         ordered = results
-        selection.setCount(results.count)
+        groupPrimaryWindowIDs = [:]
+        selection.setCount(items.count)
         selection.resetSelection()
+    }
+
+    /// 顶部快捷按钮只服务“全部窗口”模式。切换后持久化同一设置，并尽量保留原先选中的窗口/App，
+    /// 避免卡片数量改变时选中态跳到无关目标。
+    private func toggleApplicationGrouping() {
+        guard mode == .allWindows else { return }
+        let selectedWindowID: WindowID? = items.indices.contains(selection.index)
+            ? items[selection.index].primary.id
+            : nil
+
+        settings.groupWindowsByApplication.toggle()
+        groupPrimaryWindowIDs = [:]
+        selection.setCount(items.count)
+
+        if let selectedWindowID,
+           let newIndex = items.firstIndex(where: { item in item.windows.contains { $0.id == selectedWindowID } }) {
+            selection.select(newIndex)
+            if isApplicationGroupingActive {
+                groupPrimaryWindowIDs[items[newIndex].id] = selectedWindowID
+            }
+        } else {
+            selection.resetSelection()
+        }
+        rerender()
     }
 
     /// Esc：取消未到点的显示延迟、收起面板、清空会话——**不聚焦任何窗口**。
@@ -275,6 +349,12 @@ final class SwitcherController: HotkeyManagerDelegate {
         pendingShow = nil
         overlay.dismiss()
         resetSessionState()
+    }
+
+    /// 鼠标点到浮层外：与 Esc 一样立即收起且不聚焦；另外主动结束 tap 线程 session，避免继续
+    /// 吞键或在 Cmd 松开时补发一次 commit。
+    private func handleOutsideClick() {
+        cancelHotkeySession()
     }
 
     /// commit（松开触发 chord 的修饰键，或鼠标点击卡片）的共同收尾：取消未到点的显示延迟、
@@ -291,16 +371,16 @@ final class SwitcherController: HotkeyManagerDelegate {
         resetSessionState()
     }
 
-    /// 问题 1/2 的核心修复：聚焦 `ordered[selection.index]`——真实选中的这一项，不再是固定的
+    /// 问题 1/2 的核心修复：聚焦 `items[selection.index].primary`——真实选中的这一项，不再是固定的
     /// `MRU[1]`。`selection.index` 由 `SelectionModel` 自身保证落在 `[0, count-1]`
-    /// （`count == ordered.count`，`setCount`/`select`/`moveInGrid` 全部会 clamp），这里的
+    /// （`count == items.count`，`setCount`/`select`/`moveInGrid` 全部会 clamp），这里的
     /// guard 是最后一道防线，不依赖那个不变式。
     private func commitFocus() {
-        guard selection.index >= 0, selection.index < ordered.count else {
-            Self.logger.info("commitFocus: no valid selection (count=\(self.ordered.count, privacy: .public))")
+        guard selection.index >= 0, selection.index < items.count else {
+            Self.logger.info("commitFocus: no valid selection (count=\(self.items.count, privacy: .public))")
             return
         }
-        let target = ordered[selection.index]
+        let target = items[selection.index].primary
 
         if let element = handles[target.id] {
             let ok = WindowFocuser.focus(windowID: target.id, element: element, pid: target.pid)
@@ -324,6 +404,7 @@ final class SwitcherController: HotkeyManagerDelegate {
         query = ""
         columns = 1
         selection = SelectionModel(count: 0)
+        groupPrimaryWindowIDs = [:]
         switcherView = nil
         shown = false
     }
@@ -348,6 +429,11 @@ final class SwitcherController: HotkeyManagerDelegate {
 
     private static func icon(for window: WindowInfo) -> NSImage? {
         NSRunningApplication(processIdentifier: window.pid)?.icon
+    }
+
+    /// “当前 App 窗口”快捷键必须保持逐窗口；否则同一个 App 聚合后永远只有一项。
+    private var isApplicationGroupingActive: Bool {
+        mode == .allWindows && settings.groupWindowsByApplication
     }
 
     /// Task 21：按当前设置现算这次会话的外观参数（卡片尺寸档位、是否显示窗口标题、明暗）。

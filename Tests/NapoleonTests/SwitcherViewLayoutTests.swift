@@ -14,7 +14,9 @@ import CoreGraphics
         #expect(result.rows == 1)
 
         let expectedWidth = 3 * SwitcherStyle.default.cardStride.width - SwitcherMetrics.cardSpacing + SwitcherMetrics.containerPadding * 2
-        let expectedHeight = SwitcherStyle.default.cardStride.height - SwitcherMetrics.cardSpacing + SwitcherMetrics.containerPadding * 2 + SwitcherMetrics.searchBarHeight
+        let expectedHeight = SwitcherStyle.default.cardStride.height - SwitcherMetrics.cardSpacing
+            + SwitcherMetrics.containerPadding * 2 + SwitcherMetrics.searchBarHeight
+            + SwitcherMetrics.headerGridSpacing
         #expect(result.contentSize.width == expectedWidth)
         #expect(result.contentSize.height == expectedHeight)
     }

@@ -132,6 +132,7 @@ import Testing
         #expect(recovered?.appName == "微信")
         #expect(recovered?.appBundleID == "com.tencent.xinWeChat")
         #expect(recovered?.isHiddenApp == true)
+        #expect(recovered?.pinyinAppName == nil)
         #expect(recovered?.pinyinTitle == "gouwuqingdan")
     }
 }

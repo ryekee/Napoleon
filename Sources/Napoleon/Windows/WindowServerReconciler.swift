@@ -131,6 +131,7 @@ enum WindowServerReconciler {
                 isMinimized: false,
                 isHiddenApp: identity.isHidden,
                 isOnCurrentSpace: true,
+                pinyinAppName: pinyin(identity.name),
                 pinyinTitle: pinyin(window.title),
                 isFullscreen: false
             ))

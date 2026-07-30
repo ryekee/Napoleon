@@ -73,6 +73,11 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     @Published var pinyinSearchEnabled: Bool {
         didSet { defaults.set(pinyinSearchEnabled, forKey: Key.pinyinSearchEnabled.rawValue) }
     }
+    /// 全窗口切换器是否按 App 聚合。当前 App 窗口快捷键始终逐窗口显示，否则聚合后只剩一个 App、
+    /// 该快捷键将失去意义。switcher 顶部快捷按钮与设置页共用并持久化这一值。
+    @Published var groupWindowsByApplication: Bool {
+        didSet { defaults.set(groupWindowsByApplication, forKey: Key.groupWindowsByApplication.rawValue) }
+    }
     /// 卡片上是否显示第二行的窗口标题（用户需求：可开关，默认显示）。关掉后卡片只留 App 名一行，
     /// 卡片更矮、一屏能放下更多——`SwitcherMetrics` 会据此改变卡片高度，不是简单地留白。
     @Published var showWindowTitle: Bool {
@@ -133,6 +138,7 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
         case showDelayMs = "napoleon.showDelayMs"
         case thumbnailMaxCacheBytes = "napoleon.thumbnailMaxCacheBytes"
         case pinyinSearchEnabled = "napoleon.pinyinSearchEnabled"
+        case groupWindowsByApplication = "napoleon.groupWindowsByApplication"
         case showWindowTitle = "napoleon.showWindowTitle"
         case cardSize = "napoleon.cardSize"
         case followSystemAppearance = "napoleon.followSystemAppearance"
@@ -144,10 +150,21 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     static let defaultShowDelayMs = 100
     static let defaultThumbnailMaxCacheBytes = 32 * 1024 * 1024
     static let defaultPinyinSearchEnabled = true
+    static let defaultGroupWindowsByApplication = false
     static let defaultShowWindowTitle = true
     static let defaultCardSize = CardSizeOption.medium
     static let defaultFollowSystemAppearance = false
     static let defaultAppLanguage = AppLanguage.system
+
+    var hotkeysAreDefault: Bool {
+        allWindowsChord == Self.defaultAllWindowsChord
+            && currentAppChord == Self.defaultCurrentAppChord
+    }
+
+    func resetHotkeysToDefaults() {
+        allWindowsChord = Self.defaultAllWindowsChord
+        currentAppChord = Self.defaultCurrentAppChord
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -178,6 +195,8 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
             ?? Self.defaultThumbnailMaxCacheBytes
         pinyinSearchEnabled = defaults.object(forKey: Key.pinyinSearchEnabled.rawValue) as? Bool
             ?? Self.defaultPinyinSearchEnabled
+        groupWindowsByApplication = defaults.object(forKey: Key.groupWindowsByApplication.rawValue) as? Bool
+            ?? Self.defaultGroupWindowsByApplication
         showWindowTitle = defaults.object(forKey: Key.showWindowTitle.rawValue) as? Bool
             ?? Self.defaultShowWindowTitle
         // 存的是 rawValue 字符串：读不出来/是未知档位（降级安装、手改 plist）都回落默认档，

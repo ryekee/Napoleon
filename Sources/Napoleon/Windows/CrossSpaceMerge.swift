@@ -55,6 +55,7 @@ enum CrossSpaceMerge {
                 isMinimized: false,
                 isHiddenApp: isHiddenApp(screenWindow.pid),
                 isOnCurrentSpace: false,
+                pinyinAppName: pinyin(screenWindow.appName),
                 pinyinTitle: pinyin(screenWindow.title),
                 isFullscreen: isFullscreen(screenWindow.windowID)
             ))
