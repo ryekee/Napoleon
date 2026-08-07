@@ -50,7 +50,7 @@ import Testing
             Text("Check for Updates")
         })
         let diagnosticsButton = NSHostingView(rootView: SettingsActionButton(action: {}) {
-            Text("Prepare Email…")
+            Text("Share data...")
         })
 
         #expect(abs(updateButton.fittingSize.width - diagnosticsButton.fittingSize.width) < 0.5)

@@ -307,12 +307,11 @@ struct AboutView: View {
                                 .controlSize(.small)
                             Text("Preparing…")
                         } else {
-                            Text("Prepare Email…")
+                            Text("Share data...")
                         }
                     }
                 }
                 .accessibilityIdentifier("about.prepareEmail")
-                .buttonStyle(.borderedProminent)
                 .disabled(presentation.isPreparing)
             }
 

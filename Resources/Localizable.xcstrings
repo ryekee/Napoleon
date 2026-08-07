@@ -349,31 +349,31 @@
         }
       }
     },
-    "Prepare Email…": {
+    "Share data...": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Prepare Email…"
+            "value": "Share data..."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "准备邮件…"
+            "value": "分享数据..."
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "準備郵件…"
+            "value": "分享資料..."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "メールを準備…"
+            "value": "データを共有..."
           }
         }
       }
