@@ -359,7 +359,7 @@ import Testing
         #expect(presentation.isPreparing == false)
     }
 
-    @Test func missingSharingServiceCallbackStopsWaitingWithoutClaimingHandoff() async throws {
+    @Test func missingSharingServiceCallbackStopsWaitingWithoutClaimingHandoff() async {
         let service = NSSharingService(
             title: "Silent Email Client",
             image: NSImage(size: .init(width: 1, height: 1)),
@@ -387,14 +387,13 @@ import Testing
             )
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        await task.value
         #expect(presentation.isPreparing == false)
         #expect(fallbackCount == 0)
         #expect(handoffCount == 0)
         #expect(presentation.selectedIssue == .search)
         #expect(presentation.isRecordingSearchDetails)
         #expect(presentation.unconfirmedAttachmentURL == attachment)
-        await task.value
     }
 
     private func makeDiagnostics() -> DiagnosticsService {
