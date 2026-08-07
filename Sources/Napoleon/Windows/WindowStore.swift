@@ -44,7 +44,7 @@ final class WindowStore {
     /// 明显滞后于真实变化。
     private static let fullRefreshDebounceInterval: TimeInterval = 0.2
 
-    private(set) var state = WindowState()
+    private(set) var state: WindowState
 
     /// 全屏逃生：最近一次全量刷新时，用户所在 Space 本身是不是全屏（由 `spaceClassifier`
     /// 从 CGS 读出）。`snapshot()` 一并带给 `SwitcherController`，让 `WindowFilter.apply` 在
@@ -207,6 +207,7 @@ final class WindowStore {
     /// `applicationDidFinishLaunching` 里构造是同一个限制。这里改用 `nil` 哨兵 + 在
     /// init **函数体**内（本就是 MainActor-isolated 上下文）构造真正的默认值。
     init(
+        initialState: WindowState = .init(),
         enumerator: WindowEnumerator = .init(),
         observer: AXObserverController? = nil,
         screenLister: ScreenWindowLister = .init(),
@@ -216,6 +217,7 @@ final class WindowStore {
         includesOtherSpaces: @escaping @MainActor () -> Bool = { false },
         onScreenWindows: @escaping @MainActor () -> [OnScreenWindow] = { WindowServerReconciler.onScreenWindows() }
     ) {
+        self.state = initialState
         self.onScreenWindows = onScreenWindows
         self.enumerator = enumerator
         self.observer = observer ?? AXObserverController()
@@ -361,8 +363,8 @@ final class WindowStore {
         let onScreen = onScreenWindows()
         guard !onScreen.isEmpty else { return }
 
-        let missing = WindowServerReconciler.missingWindows(
-            knownIDs: Set(state.windows.map(\.id)),
+        let reconciliation = WindowServerReconciler.reconcile(
+            knownWindows: state.windows,
             onScreen: onScreen,
             appInfo: { pid in
                 guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
@@ -372,19 +374,24 @@ final class WindowStore {
             },
             pinyin: { [enumerator] title in enumerator.pinyinEnabled ? PinyinTransformer.pinyin(for: title) : nil }
         )
-        guard !missing.isEmpty else { return }
+        guard reconciliation.changed else { return }
 
-        // notice 级：这条日志是这类故障唯一的现场记录。上一次真机故障之所以只能靠推理定位，正是因为
-        // 热态漂移不留任何痕迹——补回窗口本身治好了症状，但没有它就永远说不清是什么把窗口弄丢的。
+        // notice 级：记录“完全丢失”和“已知但错误分类”两类漂移；标题不入日志，避免泄露用户内容。
         Self.logger.notice("""
-        window list drifted — recovering \(missing.count, privacy: .public) window(s) the store had lost \
+        window list drifted — recovering \(reconciliation.recoveredIDs.count, privacy: .public) missing window(s), \
+        correcting \(reconciliation.correctedIDs.count, privacy: .public) visible window(s) \
         (had \(self.state.windows.count, privacy: .public), window server sees \(onScreen.count, privacy: .public) on screen)
         """)
 
-        state = WindowStoreReducer.reduce(state, .reconciled(missing))
-        // 补进来的条目只有 CGWindowList 那点信息、没有 AX 句柄，是临时工。排一次全量刷新，让 AX 那份
-        // 权威数据把它们替换成完整的（`.fullRefresh` 是整体替换语义），顺带纠正掉这里可能误收的窗口。
-        scheduleFullRefresh()
+        state = WindowStoreReducer.reduce(state, .reconciled(reconciliation.observedWindows))
+
+        // 只有本轮新补入的窗口，或本轮首次纠正且缺少 AX 句柄的窗口，才需要让 AX 尝试补齐。
+        // 下一次呼出时状态已经正确，`reconciliation.changed == false`，不会形成刷新风暴。
+        let needsHandleRefresh = !reconciliation.recoveredIDs.isEmpty
+            || reconciliation.correctedIDs.contains { handles[$0] == nil }
+        if needsHandleRefresh {
+            scheduleFullRefresh()
+        }
     }
 
     /// 请求一次全量刷新（debounce 合并，见 `scheduleFullRefresh`）。
@@ -565,7 +572,8 @@ final class WindowStore {
         async let axTask = enumerator.enumerateAll()
         async let contentTask = Self.fetchShareableContent()
         let (axResult, content) = await (axTask, contentTask)
-        let (windows, newHandles) = axResult
+        let windows = axResult.windows
+        let newHandles = axResult.handles
         // R1：`screenLister.windows(from:)` 是纯同步过滤，不再自己发起 XPC——`content` 就是
         // 上面 `contentTask` 刚抓到的那一份（抓取失败/未授权时是 `nil`，过滤结果自然是 `[]`，
         // 跟旧 `screenLister.list()` 失败时返回 `[]` 的降级语义一致）。
@@ -605,7 +613,11 @@ final class WindowStore {
                 // 飞行期间窗口集合没变化：`windows` 本身就是当前 Space 的权威 AX 快照，直接
                 // 拿它的 id 集合去重跨 Space 追加项即可。
                 let additions = escapeAwareAdditions(axCurrentWindows: windows, screenWindows: screenWindows)
-                applyFullRefresh(windows: windows + additions, handles: newHandles)
+                applyFullRefresh(
+                    windows: windows + additions,
+                    handles: newHandles,
+                    windowLayerSnapshot: axResult.windowLayerSnapshot
+                )
             } else {
                 let freshIDs = Set(windows.map(\.id))
                 // 只把「飞行期间新创建、这份偏旧的 AX 快照还没来得及看到」的**当前 Space**窗口
@@ -635,7 +647,11 @@ final class WindowStore {
                     .filter { !journaledRemovedIDs.contains($0.id) }
                 mergedWindows.append(contentsOf: additions)
 
-                applyFullRefresh(windows: mergedWindows, handles: mergedHandles)
+                applyFullRefresh(
+                    windows: mergedWindows,
+                    handles: mergedHandles,
+                    windowLayerSnapshot: axResult.windowLayerSnapshot
+                )
             }
         }
 
@@ -767,11 +783,46 @@ final class WindowStore {
     /// 头注释），所以这种情况不会被当成 mismatch 走 merge 分支——影响范围只是一次性丢掉那一个
     /// 字段更新，窗口本身（存在与否）不受影响，下一次同一个字段再变化（或下一次全量刷新）会
     /// 自然纠正，不需要额外处理。
-    private func applyFullRefresh(windows: [WindowInfo], handles newHandles: [WindowID: AXUIElement]) {
-        state = WindowStoreReducer.reduce(state, .fullRefresh(Self.withFreshHiddenFlags(windows)))
-        handles = newHandles
+    private func applyFullRefresh(
+        windows: [WindowInfo],
+        handles newHandles: [WindowID: AXUIElement],
+        windowLayerSnapshot: WindowLayerSnapshot?
+    ) {
+        let reconciledWindows: [WindowInfo]
+        var validHandles = newHandles
+        if let windowLayerSnapshot {
+            let appliedVisibility = WindowServerReconciler.applyingPositiveVisibility(
+                to: windows,
+                onScreen: windowLayerSnapshot.onScreenWindows,
+                appInfo: { pid in
+                    guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
+                        return nil
+                    }
+                    return .init(
+                        name: app.localizedName ?? "",
+                        bundleID: app.bundleIdentifier,
+                        isHidden: app.isHidden
+                    )
+                },
+                pinyin: { [enumerator] title in
+                    enumerator.pinyinEnabled ? PinyinTransformer.pinyin(for: title) : nil
+                }
+            )
+            reconciledWindows = appliedVisibility.windows
+            for id in appliedVisibility.invalidHandleIDs {
+                validHandles.removeValue(forKey: id)
+            }
+        } else {
+            reconciledWindows = windows
+        }
+
+        state = WindowStoreReducer.reduce(
+            state,
+            .fullRefresh(Self.withFreshHiddenFlags(reconciledWindows))
+        )
+        handles = validHandles
         reverse = Dictionary(
-            uniqueKeysWithValues: newHandles.map { id, element in (AXElementKey(element: element), id) }
+            uniqueKeysWithValues: validHandles.map { id, element in (AXElementKey(element: element), id) }
         )
     }
 

@@ -29,10 +29,9 @@ public enum WindowEvent: Sendable {
     /// 窗口都不在里面）。`WindowServerReconciler` 因此在每次呼出切换器时拿 `CGWindowList` 对一次
     /// 账，把跟丢的窗口经由这个事件补回来。
     ///
-    /// 语义刻意跟 `.created` 分开，两点不同：
-    /// - **只补不改**：已经在热态里的 id 一律原样保留。对账数据来自 `CGWindowList`，比热态糙
-    ///   （拿不到 subrole、最小化状态，也没有 AX 句柄），用它覆盖一份好数据是净损失。
-    /// - **排到 MRU 末尾**而不是第 0 位（`MRUTracker.appendUnknown`，理由见该方法）。
+    /// 语义刻意跟 `.created` 分开：已知 id 只在原位替换、不改变 MRU；未知 id 排到 MRU 末尾
+    /// （`MRUTracker.appendUnknown`，理由见该方法）。调用方必须为已知 id 保留 AX 元数据，只把
+    /// Window Server 能正向确认的可见性字段修正后再传入，避免粗粒度数据覆盖完整窗口信息。
     case reconciled([WindowInfo])
 }
 
@@ -49,9 +48,13 @@ public enum WindowStoreReducer {
             }
 
         case .reconciled(let recovered):
-            for window in recovered where !state.windows.contains(where: { $0.id == window.id }) {
-                state.windows.append(window)
-                state.mru.appendUnknown(window.id)
+            for window in recovered {
+                if let index = state.windows.firstIndex(where: { $0.id == window.id }) {
+                    state.windows[index] = window
+                } else {
+                    state.windows.append(window)
+                    state.mru.appendUnknown(window.id)
+                }
             }
 
         case .destroyed(let id):

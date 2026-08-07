@@ -115,12 +115,14 @@ import Testing
         #expect(result.mru.order == [1, 2, 3])
     }
 
-    @Test func reconciledLeavesAlreadyKnownWindowsCompletelyUntouched() {
-        let known = w(1, minimized: true)
+    @Test func reconciledCorrectsAnAlreadyKnownWindowWithoutMovingItsMRUPosition() {
+        let known = w(1, minimized: true, hidden: true, onCurrentSpace: false, pinyin: "yuan biaoti")
         let state = WindowState(windows: [known], mru: MRUTracker(order: [1]))
-        // 对账数据比热态旧/糙（没有 isMinimized 信息），不许覆盖已知窗口
-        let result = WindowStoreReducer.reduce(state, .reconciled([w(1, minimized: false)]))
-        #expect(result.windows == [known])
+        let observed = w(1, minimized: false, hidden: false, onCurrentSpace: true, pinyin: "yuan biaoti")
+
+        let result = WindowStoreReducer.reduce(state, .reconciled([observed]))
+
+        #expect(result.windows == [observed])
         #expect(result.mru.order == [1])
     }
 

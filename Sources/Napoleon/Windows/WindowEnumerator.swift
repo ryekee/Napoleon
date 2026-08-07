@@ -47,14 +47,9 @@ final class WindowEnumerator: Sendable {
     }
 
     /// 全量枚举。后台并发执行，返回窗口列表 + AXUIElement 句柄映射（按 WindowID）。
-    func enumerateAll() async -> (windows: [WindowInfo], handles: [WindowID: AXUIElement]) {
+    func enumerateAll() async -> EnumerationResult {
         let snapshots = Self.snapshotRunningApplications()
-        // AX subrole 不足以识别 Electron/Chromium 的无边框浮动窗；一次性读取窗口服务器 layer，
-        // 后续所有 App 子任务复用同一快照，避免每扇窗口各做一次 CG 查询。
-        let switchableWindowIDs = WindowLayerFilter.currentSwitchableWindowIDs()
-
-        var windows: [WindowInfo] = []
-        var handles: [WindowID: AXUIElement] = [:]
+        var appResults: [AppEnumerationResult] = []
 
         // 捕获 self（Sendable，无可变状态）而不是像早前版本那样把 resolver/pinyinEnabled
         // 拆成局部变量传入——这样每个子任务都走 `windowInfo(for:pid:appName:appBundleID:
@@ -63,28 +58,82 @@ final class WindowEnumerator: Sendable {
         await withTaskGroup(of: AppEnumerationResult.self) { group in
             for snapshot in snapshots {
                 group.addTask {
-                    self.enumerateWindows(of: snapshot, switchableWindowIDs: switchableWindowIDs)
+                    self.enumerateWindows(of: snapshot, switchableWindowIDs: nil)
                 }
             }
 
             for await result in group {
-                windows.append(contentsOf: result.windows)
-                for (id, element) in result.handles {
-                    handles[id] = element
-                }
+                appResults.append(result)
             }
         }
 
-        return (windows, handles)
+        // AX subrole 不足以识别 Electron/Chromium 的无边框浮动窗；全部 AX 枚举完成后只读
+        // 一次窗口服务器，既统一做 layer 过滤，也把同一份快照交给全量刷新做可见性校正。
+        let result = Self.merge(
+            appResults: appResults,
+            windowLayerSnapshot: WindowLayerFilter.currentSnapshot()
+        )
+        for failure in result.failedApplications {
+            Self.logger.warning(
+                """
+                AX window enumeration failed pid=\(failure.pid, privacy: .public) \
+                app=\(failure.appName, privacy: .public) error=\(failure.axErrorRawValue, privacy: .public)
+                """
+            )
+        }
+        return result
     }
 
     // MARK: - Cross-task-boundary value types
 
     /// 单个 App 子任务的产出——该 App 的全部 AX 工作已经在子任务内部做完，这里只
     /// 是把结果值带回调用方。见类型头注释里的 Sendable 说明。
-    private struct AppEnumerationResult: @unchecked Sendable {
+    struct ApplicationFailure: Equatable, Sendable {
+        let pid: ProcessID
+        let appName: String
+        let axErrorRawValue: Int32
+    }
+
+    struct EnumerationResult: @unchecked Sendable {
         let windows: [WindowInfo]
         let handles: [WindowID: AXUIElement]
+        let windowLayerSnapshot: WindowLayerSnapshot?
+        let failedApplications: [ApplicationFailure]
+    }
+
+    struct AppEnumerationResult: @unchecked Sendable {
+        let windows: [WindowInfo]
+        let handles: [WindowID: AXUIElement]
+        let failure: ApplicationFailure?
+    }
+
+    static func merge(
+        appResults: [AppEnumerationResult],
+        windowLayerSnapshot: WindowLayerSnapshot?
+    ) -> EnumerationResult {
+        let switchableWindowIDs = windowLayerSnapshot?.switchableWindowIDs
+        var windows: [WindowInfo] = []
+        var handles: [WindowID: AXUIElement] = [:]
+        var failedApplications: [ApplicationFailure] = []
+
+        for result in appResults {
+            if let failure = result.failure {
+                failedApplications.append(failure)
+            }
+            for window in result.windows where switchableWindowIDs?.contains(window.id) != false {
+                windows.append(window)
+                if let handle = result.handles[window.id] {
+                    handles[window.id] = handle
+                }
+            }
+        }
+
+        return EnumerationResult(
+            windows: windows,
+            handles: handles,
+            windowLayerSnapshot: windowLayerSnapshot,
+            failedApplications: failedApplications
+        )
     }
 
     /// `NSRunningApplication` 的纯值快照——真正跨子任务边界传入的输入，全是
@@ -127,7 +176,15 @@ final class WindowEnumerator: Sendable {
         var windowsRef: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
         guard error == .success, let axWindows = windowsRef as? [AXUIElement] else {
-            return AppEnumerationResult(windows: [], handles: [:])
+            return AppEnumerationResult(
+                windows: [],
+                handles: [:],
+                failure: ApplicationFailure(
+                    pid: app.pid,
+                    appName: app.appName,
+                    axErrorRawValue: error.rawValue
+                )
+            )
         }
 
         var windows: [WindowInfo] = []
@@ -148,7 +205,7 @@ final class WindowEnumerator: Sendable {
             handles[result.id] = result.element
         }
 
-        return AppEnumerationResult(windows: windows, handles: handles)
+        return AppEnumerationResult(windows: windows, handles: handles, failure: nil)
     }
 
     /// 单个窗口 AXUIElement → `WindowInfo` + 句柄。任一必要条件不满足（subrole 不对、

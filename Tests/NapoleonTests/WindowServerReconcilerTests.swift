@@ -136,3 +136,129 @@ import Testing
         #expect(recovered?.pinyinTitle == "gouwuqingdan")
     }
 }
+
+@Suite struct WindowServerReconcilerVisibilityTests {
+    private let anyApp: (ProcessID) -> WindowServerReconciler.AppIdentity? = { _ in
+        .init(name: "App", bundleID: "com.example.app", isHidden: false)
+    }
+    private let noPinyin: (String) -> String? = { _ in nil }
+
+    private func onScreen(_ id: WindowID, pid: ProcessID = 100) -> OnScreenWindow {
+        OnScreenWindow(windowID: id, pid: pid, title: "coarse CG title",
+                       bounds: CGRect(x: 0, y: 0, width: 100, height: 100))
+    }
+
+    @Test func correctsOnlyVisibilityFieldsOfAKnownOnScreenWindow() throws {
+        let known = WindowInfo(
+            id: 1,
+            pid: 100,
+            appName: "Original App",
+            appBundleID: "com.example.original",
+            title: "Rich AX title",
+            isMinimized: true,
+            isHiddenApp: true,
+            isOnCurrentSpace: false,
+            pinyinAppName: "original app",
+            pinyinTitle: "rich ax title",
+            isFullscreen: true
+        )
+
+        let result = WindowServerReconciler.reconcile(
+            knownWindows: [known],
+            onScreen: [onScreen(1)],
+            appInfo: anyApp,
+            pinyin: noPinyin
+        )
+
+        let corrected = try #require(result.observedWindows.first)
+        #expect(result.correctedIDs == [1])
+        #expect(result.recoveredIDs.isEmpty)
+        #expect(corrected.id == 1)
+        #expect(corrected.pid == 100)
+        #expect(corrected.appName == "Original App")
+        #expect(corrected.appBundleID == "com.example.original")
+        #expect(corrected.title == "Rich AX title")
+        #expect(corrected.pinyinAppName == "original app")
+        #expect(corrected.pinyinTitle == "rich ax title")
+        #expect(corrected.isFullscreen == true)
+        #expect(corrected.isOnCurrentSpace == true)
+        #expect(corrected.isMinimized == false)
+        #expect(corrected.isHiddenApp == false)
+    }
+
+    @Test func leavesKnownWindowsAloneWithoutPositiveOnScreenEvidence() {
+        let known = WindowInfo(
+            id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Title",
+            isMinimized: true, isHiddenApp: true, isOnCurrentSpace: false
+        )
+
+        let result = WindowServerReconciler.reconcile(
+            knownWindows: [known],
+            onScreen: [onScreen(2)],
+            appInfo: { _ in nil },
+            pinyin: noPinyin
+        )
+
+        #expect(result.observedWindows.isEmpty)
+        #expect(result.correctedIDs.isEmpty)
+        #expect(result.recoveredIDs.isEmpty)
+        #expect(result.changed == false)
+    }
+
+    @Test func alreadyCorrectKnownWindowProducesNoWrite() {
+        let known = WindowInfo(id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Title")
+
+        let result = WindowServerReconciler.reconcile(
+            knownWindows: [known],
+            onScreen: [onScreen(1)],
+            appInfo: anyApp,
+            pinyin: noPinyin
+        )
+
+        #expect(result.observedWindows.isEmpty)
+        #expect(result.changed == false)
+    }
+
+    @Test func fullRefreshAppliesPositiveVisibilityWithoutDroppingUnobservedWindows() {
+        let stale = WindowInfo(
+            id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Visible",
+            isMinimized: true, isHiddenApp: true, isOnCurrentSpace: false
+        )
+        let unobserved = WindowInfo(
+            id: 2, pid: 100, appName: "App", appBundleID: nil, title: "Other Space",
+            isMinimized: false, isHiddenApp: false, isOnCurrentSpace: false
+        )
+
+        let result = WindowServerReconciler.applyingPositiveVisibility(
+            to: [stale, unobserved],
+            onScreen: [onScreen(1)],
+            appInfo: anyApp,
+            pinyin: noPinyin
+        )
+
+        #expect(result.windows.map(\.id) == [1, 2])
+        #expect(result.windows[0].isOnCurrentSpace == true)
+        #expect(result.windows[0].isMinimized == false)
+        #expect(result.windows[0].isHiddenApp == false)
+        #expect(result.windows[1] == unobserved)
+        #expect(result.invalidHandleIDs.isEmpty)
+    }
+
+    @Test func reusedWindowIDInvalidatesTheOldAXHandle() throws {
+        let stale = WindowInfo(
+            id: 1, pid: 100, appName: "Old App", appBundleID: nil, title: "Old Window"
+        )
+
+        let result = WindowServerReconciler.applyingPositiveVisibility(
+            to: [stale],
+            onScreen: [onScreen(1, pid: 200)],
+            appInfo: { pid in
+                pid == 200 ? .init(name: "New App", bundleID: nil, isHidden: false) : nil
+            },
+            pinyin: noPinyin
+        )
+
+        #expect(result.invalidHandleIDs == [1])
+        #expect(try #require(result.windows.first).pid == 200)
+    }
+}

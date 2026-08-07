@@ -42,6 +42,20 @@ enum WindowServerReconciler {
         let isHidden: Bool
     }
 
+    struct Reconciliation {
+        let observedWindows: [WindowInfo]
+        let correctedIDs: Set<WindowID>
+        let recoveredIDs: Set<WindowID>
+
+        var changed: Bool { !correctedIDs.isEmpty || !recoveredIDs.isEmpty }
+    }
+
+    struct AppliedVisibility {
+        let windows: [WindowInfo]
+        /// Window ID 被另一进程复用时，旧 AX 句柄绝不能继续跟新窗口配对。
+        let invalidHandleIDs: Set<WindowID>
+    }
+
     // MARK: - 地面真相（不纯：读窗口服务器）
 
     /// 读一次窗口服务器，返回当前可见的真实 App 窗口。失败/读不到时返回空数组——调用方据此
@@ -93,6 +107,82 @@ enum WindowServerReconciler {
                 bounds: CGRect(x: x, y: y, width: width, height: height)
             )
         }
+    }
+
+    /// 把 Window Server 的 on-screen 正向证据转换为可安全并入热态的候选。
+    /// 已知窗口保留 AX 元数据，只纠正「当前 Space / 最小化 / 隐藏」三个可见性字段；
+    /// 未知窗口才使用 CGWindowList 的粗粒度信息创建临时条目。未出现在 on-screen 集合里的
+    /// 已知窗口完全不动，因为“这次没看见”不是跨 Space、隐藏或最小化的可靠反向证据。
+    static func reconcile(
+        knownWindows: [WindowInfo],
+        onScreen: [OnScreenWindow],
+        appInfo: (ProcessID) -> AppIdentity?,
+        pinyin: (String) -> String?
+    ) -> Reconciliation {
+        let knownByID = Dictionary(knownWindows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var seen: Set<WindowID> = []
+        var observed: [WindowInfo] = []
+        var correctedIDs: Set<WindowID> = []
+        var recoveredIDs: Set<WindowID> = []
+
+        for window in onScreen {
+            guard seen.insert(window.windowID).inserted else { continue }
+
+            if var known = knownByID[window.windowID], known.pid == window.pid {
+                guard !known.isOnCurrentSpace || known.isMinimized || known.isHiddenApp else { continue }
+                known.isOnCurrentSpace = true
+                known.isMinimized = false
+                known.isHiddenApp = false
+                observed.append(known)
+                correctedIDs.insert(window.windowID)
+                continue
+            }
+
+            guard let identity = appInfo(window.pid) else { continue }
+            observed.append(WindowInfo(
+                id: window.windowID,
+                pid: window.pid,
+                appName: identity.name,
+                appBundleID: identity.bundleID,
+                title: window.title,
+                isMinimized: false,
+                isHiddenApp: false,
+                isOnCurrentSpace: true,
+                pinyinAppName: pinyin(identity.name),
+                pinyinTitle: pinyin(window.title),
+                isFullscreen: false
+            ))
+            recoveredIDs.insert(window.windowID)
+        }
+
+        return Reconciliation(
+            observedWindows: observed,
+            correctedIDs: correctedIDs,
+            recoveredIDs: recoveredIDs
+        )
+    }
+
+    /// 在全量刷新真正落地前，把同一轮 Window Server 快照里的正向可见性证据覆盖进去。
+    /// 未出现在快照里的窗口保持不变；已知窗口保持原顺序，未知窗口追加到末尾。
+    static func applyingPositiveVisibility(
+        to windows: [WindowInfo],
+        onScreen: [OnScreenWindow],
+        appInfo: (ProcessID) -> AppIdentity?,
+        pinyin: (String) -> String?
+    ) -> AppliedVisibility {
+        let reconciliation = reconcile(
+            knownWindows: windows,
+            onScreen: onScreen,
+            appInfo: appInfo,
+            pinyin: pinyin
+        )
+        return AppliedVisibility(
+            windows: WindowStoreReducer.reduce(
+                WindowState(windows: windows),
+                .reconciled(reconciliation.observedWindows)
+            ).windows,
+            invalidHandleIDs: reconciliation.recoveredIDs
+        )
     }
 
     /// 算出「窗口服务器说在屏幕上、而热态里没有」的那些窗口，转成可以直接并进热态的 `WindowInfo`。
