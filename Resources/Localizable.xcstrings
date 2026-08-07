@@ -88,31 +88,31 @@
         }
       }
     },
-    "Could not attach the ZIP automatically. Add it to the email draft from Finder.": {
+    "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not attach the ZIP automatically. Add it to the email draft from Finder."
+            "value": "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "无法自动附加 ZIP，请从 Finder 将其添加到邮件草稿。"
+            "value": "无法打开默认邮件应用。ZIP 已在访达中选中；请手动将其添加到发送至 hi@ryek.ee 的邮件中。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "無法自動附加 ZIP，請從 Finder 將其加入郵件草稿。"
+            "value": "無法開啟預設郵件 App。ZIP 已在 Finder 中選取；請手動將它加入寄給 hi@ryek.ee 的郵件。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZIP を自動添付できませんでした。Finder からメール下書きに追加してください。"
+            "value": "デフォルトのメールアプリを開けませんでした。ZIP は Finder で選択されています。hi@ryek.ee 宛てのメールに手動で添付してください。"
           }
         }
       }
@@ -233,89 +233,31 @@
         }
       }
     },
-    "Email draft cancelled; the ZIP will remain on this Mac for up to two hours.": {
+    "System model: %@\nmacOS version: %@\nNapoleon version: %@ (build %@)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Email draft cancelled; the ZIP will remain on this Mac for up to two hours."
+            "value": "System model: %@\nmacOS version: %@\nNapoleon version: %@ (build %@)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "邮件草稿已取消；ZIP 最多在本机保留两小时。"
+            "value": "系统型号：%@\nmacOS 版本：%@\nNapoleon 版本：%@（build %@）\n\n请将访达中打开的诊断 ZIP 手动添加为附件。Napoleon 不会自动上传该文件。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "郵件草稿已取消；ZIP 最多會在此 Mac 保留兩小時。"
+            "value": "系統型號：%@\nmacOS 版本：%@\nNapoleon 版本：%@（build %@）\n\n請將 Finder 中開啟的診斷 ZIP 手動加入為附件。Napoleon 不會自動上傳此檔案。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "メールの下書きをキャンセルしました。ZIP はこの Mac に最長2時間保持されます。"
-          }
-        }
-      }
-    },
-    "Show ZIP in Finder": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show ZIP in Finder"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在访达中显示 ZIP"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在 Finder 中顯示 ZIP"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Finder で ZIP を表示"
-          }
-        }
-      }
-    },
-    "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "邮件客户端未确认草稿。ZIP 最多在本机保留两小时。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "郵件用戶端未確認草稿。ZIP 最多會在此 Mac 保留兩小時。"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "メールクライアントから下書きの確認を受け取れませんでした。ZIP はこの Mac に最長2時間保持されます。"
+            "value": "システムモデル：%@\nmacOS バージョン：%@\nNapoleon バージョン：%@（build %@）\n\nFinder で開いた診断 ZIP を手動で添付してください。Napoleon がこのファイルを自動でアップロードすることはありません。"
           }
         }
       }
@@ -403,35 +345,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "診断する問題"
-          }
-        }
-      }
-    },
-    "Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Napoleon 不会直接上传日志。您的邮件客户端可能会同步邮件草稿和附件，请在发送前检查邮件。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Napoleon 不會直接上傳日誌。您的郵件用戶端可能會同步郵件草稿與附件，請在傳送前檢查郵件。"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Napoleon がログを直接アップロードすることはありません。メールクライアントが下書きと添付ファイルを同期する場合があります。送信前にメールを確認してください。"
           }
         }
       }

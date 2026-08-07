@@ -1,111 +1,48 @@
 import AppKit
+import Darwin
 import SwiftUI
 
-/// 把 `NSSharingServiceDelegate` 回调桥接成可等待的邮件草稿交接结果。
-///
-/// `NSSharingService.delegate` 是 weak，而 `perform(withItems:)` 的成功/失败又在之后异步回调；
-/// 因此本对象在回调前强持有 service，自身则由稳定的 presentation 持有。
-@MainActor
-final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
-    enum Result: Equatable {
-        case shared
-        case unavailableOrFailed
-        case cancelled
-        case unconfirmed
+struct DiagnosticEmailDraft {
+    let systemModel: String
+    let macOSVersion: String
+    let appVersion: String
+    let appBuild: String
+
+    func url(locale: Locale = .current) -> URL? {
+        let template = String(
+            localized: "System model: %@\nmacOS version: %@\nNapoleon version: %@ (build %@)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically.",
+            locale: locale
+        )
+        let body = String(format: template, systemModel, macOSVersion, appVersion, appBuild)
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = "hi@ryek.ee"
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: "Napoleon diagnostics"),
+            URLQueryItem(name: "body", value: body)
+        ]
+        return components.url
     }
+}
 
-    typealias ServiceProvider = @MainActor () -> NSSharingService?
-    typealias CanPerform = @MainActor (NSSharingService, [Any]) -> Bool
-    typealias Perform = @MainActor (NSSharingService, [Any]) -> Void
-
-    private let serviceProvider: ServiceProvider
-    private let canPerform: CanPerform
-    private let perform: Perform
-    private let confirmationTimeout: Duration
-    private var retainedService: NSSharingService?
-    private var continuation: CheckedContinuation<Result, Never>?
-    private var confirmationTask: Task<Void, Never>?
-
-    init(
-        serviceProvider: @escaping ServiceProvider = {
-            NSSharingService(named: .composeEmail)
-        },
-        canPerform: @escaping CanPerform = { service, items in
-            service.canPerform(withItems: items)
-        },
-        perform: @escaping Perform = { service, items in
-            service.perform(withItems: items)
-        },
-        confirmationTimeout: Duration = .seconds(2)
-    ) {
-        self.serviceProvider = serviceProvider
-        self.canPerform = canPerform
-        self.perform = perform
-        self.confirmationTimeout = confirmationTimeout
-    }
-
-    func compose(attachment: URL) async -> Result {
-        // 上层 presentation 已保证单飞；这里再拒绝意外的并发调用，
-        // 避免新 continuation 覆盖仍在等回调的旧 continuation。
-        guard continuation == nil else { return .unavailableOrFailed }
-
-        return await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            guard let service = serviceProvider() else {
-                resolve(.unavailableOrFailed)
-                return
-            }
-
-            let items: [Any] = [attachment]
-            guard canPerform(service, items) else {
-                resolve(.unavailableOrFailed)
-                return
-            }
-
-            retainedService = service
-            service.delegate = self
-            service.recipients = ["hi@ryek.ee"]
-            service.subject = "Napoleon diagnostics"
-
-            // 第三方邮件客户端可能已经打开带附件草稿，却始终不触发 delegate 回调。
-            // 超时只停止等待并保留 ZIP，不把未确认状态误报为交接成功。
-            confirmationTask = Task { [weak self] in
-                guard let self else { return }
-                try? await Task.sleep(for: confirmationTimeout)
-                guard !Task.isCancelled else { return }
-                resolve(.unconfirmed)
-            }
-            perform(service, items)
+private enum SystemInformation {
+    static var hardwareModelIdentifier: String {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 1 else {
+            return "Unknown"
         }
-    }
 
-    func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
-        guard sharingService === retainedService else { return }
-        resolve(.shared)
-    }
-
-    func sharingService(
-        _ sharingService: NSSharingService,
-        didFailToShareItems items: [Any],
-        error: any Error
-    ) {
-        guard sharingService === retainedService else { return }
-        let nsError = error as NSError
-        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSUserCancelledError {
-            resolve(.cancelled)
-        } else {
-            resolve(.unavailableOrFailed)
+        var value = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &value, &size, nil, 0) == 0 else {
+            return "Unknown"
         }
+        return String(cString: value)
     }
 
-    private func resolve(_ result: Result) {
-        guard let continuation else { return }
-        self.continuation = nil
-        confirmationTask?.cancel()
-        confirmationTask = nil
-        retainedService?.delegate = nil
-        retainedService = nil
-        continuation.resume(returning: result)
+    static var macOSVersion: String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let base = "\(version.majorVersion).\(version.minorVersion)"
+        return version.patchVersion == 0 ? base : "\(base).\(version.patchVersion)"
     }
 }
 
@@ -116,27 +53,16 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
 @MainActor
 final class AboutDiagnosticsPresentation: ObservableObject {
     enum Completion {
-        case handedOff(requiresManualAttachment: Bool)
-        case cancelled
-        case unconfirmed(URL)
+        case handedOff
         case failed(String)
     }
 
     @Published private(set) var selectedIssue: DiagnosticIssue = .default
     @Published private(set) var isPreparing = false
     @Published private(set) var error: String?
-    @Published private(set) var requiresManualAttachment = false
-    @Published private(set) var emailDraftWasCancelled = false
-    @Published private(set) var unconfirmedAttachmentURL: URL?
 
     var isRecordingSearchDetails: Bool {
         selectedIssue == .search
-    }
-
-    private let emailComposer: EmailDraftComposer
-
-    init(emailComposer: EmailDraftComposer? = nil) {
-        self.emailComposer = emailComposer ?? EmailDraftComposer()
     }
 
     @discardableResult
@@ -144,9 +70,6 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         guard !isPreparing else { return false }
         selectedIssue = issue
         error = nil
-        requiresManualAttachment = false
-        emailDraftWasCancelled = false
-        unconfirmedAttachmentURL = nil
         return true
     }
 
@@ -155,9 +78,6 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         guard !isPreparing else { return false }
         isPreparing = true
         error = nil
-        requiresManualAttachment = false
-        emailDraftWasCancelled = false
-        unconfirmedAttachmentURL = nil
         return true
     }
 
@@ -166,27 +86,11 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         defer { isPreparing = false }
 
         switch completion {
-        case .handedOff(let requiresManualAttachment):
+        case .handedOff:
             selectedIssue = .general
             error = nil
-            self.requiresManualAttachment = requiresManualAttachment
-            emailDraftWasCancelled = false
-            unconfirmedAttachmentURL = nil
-        case .cancelled:
-            error = nil
-            requiresManualAttachment = false
-            emailDraftWasCancelled = true
-            unconfirmedAttachmentURL = nil
-        case .unconfirmed(let attachment):
-            error = nil
-            requiresManualAttachment = false
-            emailDraftWasCancelled = false
-            unconfirmedAttachmentURL = attachment
         case .failed(let message):
             error = message
-            requiresManualAttachment = false
-            emailDraftWasCancelled = false
-            unconfirmedAttachmentURL = nil
         }
     }
 
@@ -210,30 +114,31 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         }
     }
 
-    /// 只有 sharing service 回调 `didShareItems` 才视为系统邮件交接成功。
-    /// 非取消的 `didFailToShareItems` 或系统没有可用 Email service 时先进入手动附件 fallback，
-    /// 然后才统一清理原始报告状态；用户取消只结束进度并保留当前 issue。
-    /// 所有路径都不代表用户最终点击了 Send。
+    /// ZIP 先在 Finder 中定位，再用 mailto 打开用户的默认邮件客户端。
+    /// 邮件不自动附加 ZIP，也不代表用户最终点击了 Send。
     func handOffPreparedReport(
         _ attachment: URL,
-        openFallback: @MainActor (URL) -> Void,
+        mailtoURL: URL?,
+        revealInFinder: @MainActor (URL) -> Void,
+        openEmail: @MainActor (URL) -> Bool,
         markHandedOff: @MainActor () -> Void
-    ) async {
+    ) {
         guard isPreparing else { return }
+        revealInFinder(attachment)
 
-        switch await emailComposer.compose(attachment: attachment) {
-        case .shared:
-            markHandedOff()
-            finishPreparation(.handedOff(requiresManualAttachment: false))
-        case .unavailableOrFailed:
-            openFallback(attachment)
-            markHandedOff()
-            finishPreparation(.handedOff(requiresManualAttachment: true))
-        case .cancelled:
-            finishPreparation(.cancelled)
-        case .unconfirmed:
-            finishPreparation(.unconfirmed(attachment))
+        guard let mailtoURL, openEmail(mailtoURL) else {
+            finishPreparation(
+                .failed(
+                    String(
+                        localized: "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee."
+                    )
+                )
+            )
+            return
         }
+
+        markHandedOff()
+        finishPreparation(.handedOff)
     }
 }
 
@@ -404,7 +309,15 @@ struct AboutView: View {
                     .foregroundStyle(.orange)
             }
 
-            HStack(alignment: .top, spacing: 12) {
+            if let error = presentation.error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
                 Button(action: prepareDiagnosticsEmail) {
                     HStack(spacing: 6) {
                         if presentation.isPreparing {
@@ -419,10 +332,6 @@ struct AboutView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(presentation.isPreparing)
-
-                diagnosticsStatus
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(20)
@@ -440,43 +349,27 @@ struct AboutView: View {
         AboutDiagnosticsPresentation.privacyDisclosure(for: presentation.selectedIssue)
     }
 
-    @ViewBuilder
-    private var diagnosticsStatus: some View {
-        if let error = presentation.error {
-            Text(error)
-                .foregroundStyle(.red)
-        } else if presentation.requiresManualAttachment {
-            Text("Could not attach the ZIP automatically. Add it to the email draft from Finder.")
-                .foregroundStyle(.orange)
-        } else if presentation.emailDraftWasCancelled {
-            Text("Email draft cancelled; the ZIP will remain on this Mac for up to two hours.")
-                .foregroundStyle(.secondary)
-        } else if let attachment = presentation.unconfirmedAttachmentURL {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.")
-                    .foregroundStyle(.secondary)
-                Button("Show ZIP in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([attachment])
-                }
-                .buttonStyle(.link)
-            }
-        } else {
-            Text("Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.")
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private func prepareDiagnosticsEmail() {
         let diagnostics = diagnostics
         let presentation = presentation
+        let mailtoURL = DiagnosticEmailDraft(
+            systemModel: SystemInformation.hardwareModelIdentifier,
+            macOSVersion: SystemInformation.macOSVersion,
+            appVersion: updateChecker.currentVersion,
+            appBuild: updateChecker.currentBuild
+        ).url()
         guard presentation.beginPreparation() else { return }
 
         Task { @MainActor [diagnostics, presentation] in
             do {
                 let attachment = try await diagnostics.prepareReport()
-                await presentation.handOffPreparedReport(
+                presentation.handOffPreparedReport(
                     attachment,
-                    openFallback: Self.openManualAttachmentFallback,
+                    mailtoURL: mailtoURL,
+                    revealInFinder: {
+                        NSWorkspace.shared.activateFileViewerSelecting([$0])
+                    },
+                    openEmail: { NSWorkspace.shared.open($0) },
                     markHandedOff: { diagnostics.reportWasHandedOff() }
                 )
             } catch {
@@ -489,13 +382,6 @@ struct AboutView: View {
                     )
                 )
             }
-        }
-    }
-
-    private static func openManualAttachmentFallback(attachment: URL) {
-        NSWorkspace.shared.activateFileViewerSelecting([attachment])
-        if let draftURL = URL(string: "mailto:hi@ryek.ee?subject=Napoleon%20diagnostics") {
-            NSWorkspace.shared.open(draftURL)
         }
     }
 }

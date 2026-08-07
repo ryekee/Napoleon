@@ -74,30 +74,21 @@ import Testing
                 ]
             ),
             (
-                "Email draft cancelled; the ZIP will remain on this Mac for up to two hours.",
+                "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee.",
                 [
-                    "en": "Email draft cancelled; the ZIP will remain on this Mac for up to two hours.",
-                    "zh-Hans": "邮件草稿已取消；ZIP 最多在本机保留两小时。",
-                    "zh-Hant": "郵件草稿已取消；ZIP 最多會在此 Mac 保留兩小時。",
-                    "ja": "メールの下書きをキャンセルしました。ZIP はこの Mac に最長2時間保持されます。"
+                    "en": "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee.",
+                    "zh-Hans": "无法打开默认邮件应用。ZIP 已在访达中选中；请手动将其添加到发送至 hi@ryek.ee 的邮件中。",
+                    "zh-Hant": "無法開啟預設郵件 App。ZIP 已在 Finder 中選取；請手動將它加入寄給 hi@ryek.ee 的郵件。",
+                    "ja": "デフォルトのメールアプリを開けませんでした。ZIP は Finder で選択されています。hi@ryek.ee 宛てのメールに手動で添付してください。"
                 ]
             ),
             (
-                "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.",
+                "System model: %@\nmacOS version: %@\nNapoleon version: %@ (build %@)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically.",
                 [
-                    "en": "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.",
-                    "zh-Hans": "邮件客户端未确认草稿。ZIP 最多在本机保留两小时。",
-                    "zh-Hant": "郵件用戶端未確認草稿。ZIP 最多會在此 Mac 保留兩小時。",
-                    "ja": "メールクライアントから下書きの確認を受け取れませんでした。ZIP はこの Mac に最長2時間保持されます。"
-                ]
-            ),
-            (
-                "Show ZIP in Finder",
-                [
-                    "en": "Show ZIP in Finder",
-                    "zh-Hans": "在访达中显示 ZIP",
-                    "zh-Hant": "在 Finder 中顯示 ZIP",
-                    "ja": "Finder で ZIP を表示"
+                    "en": "System model: %@\nmacOS version: %@\nNapoleon version: %@ (build %@)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically.",
+                    "zh-Hans": "系统型号：%@\nmacOS 版本：%@\nNapoleon 版本：%@（build %@）\n\n请将访达中打开的诊断 ZIP 手动添加为附件。Napoleon 不会自动上传该文件。",
+                    "zh-Hant": "系統型號：%@\nmacOS 版本：%@\nNapoleon 版本：%@（build %@）\n\n請將 Finder 中開啟的診斷 ZIP 手動加入為附件。Napoleon 不會自動上傳此檔案。",
+                    "ja": "システムモデル：%@\nmacOS バージョン：%@\nNapoleon バージョン：%@（build %@）\n\nFinder で開いた診断 ZIP を手動で添付してください。Napoleon がこのファイルを自動でアップロードすることはありません。"
                 ]
             ),
             (
@@ -131,7 +122,7 @@ import Testing
 
         for message in messages {
             for (localeIdentifier, expected) in message.translations {
-                let appBundle = Bundle(for: EmailDraftComposer.self)
+                let appBundle = Bundle(for: AboutDiagnosticsPresentation.self)
                 let localizationURL = try #require(
                     appBundle.url(forResource: localeIdentifier, withExtension: "lproj")
                 )
@@ -166,234 +157,95 @@ import Testing
 
         #expect(presentation.selectIssue(.search))
         #expect(presentation.beginPreparation())
-        presentation.finishPreparation(.handedOff(requiresManualAttachment: false))
+        presentation.finishPreparation(.handedOff)
         #expect(presentation.isRecordingSearchDetails == false)
+    }
+
+    @Test func mailtoContainsRecipientSystemModelVersionAndManualAttachmentInstruction() throws {
+        let draft = DiagnosticEmailDraft(
+            systemModel: "Mac14,6",
+            macOSVersion: "26.0.1",
+            appVersion: "0.2.0",
+            appBuild: "39"
+        )
+        let url = try #require(draft.url(locale: Locale(identifier: "en")))
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) })
+
+        #expect(components.scheme == "mailto")
+        #expect(components.path == "hi@ryek.ee")
+        #expect(query["subject"] == "Napoleon diagnostics")
+        #expect(
+            query["body"]
+                == "System model: Mac14,6\nmacOS version: 26.0.1\nNapoleon version: 0.2.0 (build 39)\n\nPlease attach the diagnostic ZIP opened in Finder. Napoleon does not upload it automatically."
+        )
+    }
+
+    @Test func preparedReportRevealsZipThenOpensDefaultEmailAndCompletesHandoff() throws {
+        let presentation = AboutDiagnosticsPresentation()
+        let attachment = URL(fileURLWithPath: "/tmp/napoleon-test.zip")
+        let mailto = try #require(URL(string: "mailto:hi@ryek.ee"))
+        var events: [String] = []
+        var handoffCount = 0
 
         #expect(presentation.selectIssue(.search))
         #expect(presentation.beginPreparation())
-        presentation.finishPreparation(.cancelled)
-        #expect(presentation.isRecordingSearchDetails)
-        #expect(presentation.emailDraftWasCancelled)
+        presentation.handOffPreparedReport(
+            attachment,
+            mailtoURL: mailto,
+            revealInFinder: {
+                #expect($0 == attachment)
+                events.append("finder")
+            },
+            openEmail: {
+                #expect($0 == mailto)
+                events.append("email")
+                return true
+            },
+            markHandedOff: {
+                events.append("handoff")
+                handoffCount += 1
+            }
+        )
+
+        #expect(events == ["finder", "email", "handoff"])
+        #expect(handoffCount == 1)
+        #expect(presentation.selectedIssue == .general)
+        #expect(presentation.error == nil)
+        #expect(presentation.isPreparing == false)
     }
 
-    @Test func unavailableServiceChecksActualAttachmentThenFallsBackWithoutPerforming() async {
-        let service = NSSharingService(
-            title: "Unavailable Email",
-            image: NSImage(size: .init(width: 1, height: 1)),
-            alternateImage: nil,
-            handler: {}
-        )
-        let attachment = URL(fileURLWithPath: "/tmp/napoleon-unavailable.zip")
-        var checkedAttachment: URL?
-        var performCount = 0
-        let composer = EmailDraftComposer(
-            serviceProvider: { service },
-            canPerform: { _, items in
-                checkedAttachment = items.first as? URL
-                return false
-            },
-            perform: { _, _ in performCount += 1 }
-        )
-        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
-        var fallbackAttachments: [URL] = []
+    @Test func failedDefaultEmailStillRevealsZipWithoutDiscardingReportState() throws {
+        let presentation = AboutDiagnosticsPresentation()
+        let attachment = URL(fileURLWithPath: "/tmp/napoleon-email-failed.zip")
+        let mailto = try #require(URL(string: "mailto:hi@ryek.ee"))
+        var revealedAttachments: [URL] = []
+        var openedURLs: [URL] = []
         var handoffCount = 0
 
+        #expect(presentation.selectIssue(.search))
         #expect(presentation.beginPreparation())
-        await presentation.handOffPreparedReport(
+        presentation.handOffPreparedReport(
             attachment,
-            openFallback: { fallbackAttachments.append($0) },
+            mailtoURL: mailto,
+            revealInFinder: { revealedAttachments.append($0) },
+            openEmail: {
+                openedURLs.append($0)
+                return false
+            },
             markHandedOff: { handoffCount += 1 }
         )
 
-        #expect(checkedAttachment == attachment)
-        #expect(performCount == 0)
-        #expect(fallbackAttachments == [attachment])
-        #expect(handoffCount == 1)
-        #expect(presentation.requiresManualAttachment)
+        #expect(revealedAttachments == [attachment])
+        #expect(openedURLs == [mailto])
         #expect(presentation.isPreparing == false)
-    }
-
-    @Test func cancelledEmailDraftHasNoFallbackOrHandoffAndKeepsSearchRecording() async {
-        let service = NSSharingService(
-            title: "Cancelled Email",
-            image: NSImage(size: .init(width: 1, height: 1)),
-            alternateImage: nil,
-            handler: {}
-        )
-        let composer = EmailDraftComposer(
-            serviceProvider: { service },
-            canPerform: { _, _ in true },
-            perform: { _, _ in }
-        )
-        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
-        let attachment = URL(fileURLWithPath: "/tmp/napoleon-cancelled.zip")
-        var fallbackCount = 0
-        var handoffCount = 0
-
-        #expect(presentation.selectIssue(.search))
-        #expect(presentation.beginPreparation())
-        let task = Task { @MainActor in
-            await presentation.handOffPreparedReport(
-                attachment,
-                openFallback: { _ in fallbackCount += 1 },
-                markHandedOff: { handoffCount += 1 }
-            )
-        }
-        await Task.yield()
-
-        composer.sharingService(
-            service,
-            didFailToShareItems: [attachment],
-            error: NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError)
-        )
-        await task.value
-
-        #expect(fallbackCount == 0)
         #expect(handoffCount == 0)
         #expect(presentation.selectedIssue == .search)
         #expect(presentation.isRecordingSearchDetails)
-        #expect(presentation.emailDraftWasCancelled)
-        #expect(presentation.isPreparing == false)
-    }
-
-    @Test func delayedShareFailureFallsBackBeforeExactlyOneHandoffAndRetainsService() async throws {
-        weak var retainedService: NSSharingService?
-        var performCount = 0
-        let composer = EmailDraftComposer(
-            serviceProvider: {
-                let service = NSSharingService(
-                    title: "Test Email",
-                    image: NSImage(size: .init(width: 1, height: 1)),
-                    alternateImage: nil,
-                    handler: {}
-                )
-                retainedService = service
-                return service
-            },
-            canPerform: { _, _ in true },
-            perform: { _, _ in performCount += 1 }
+        #expect(
+            presentation.error
+                == String(localized: "Could not open your default email app. The ZIP is selected in Finder; attach it manually to an email to hi@ryek.ee.")
         )
-        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
-        let attachment = URL(fileURLWithPath: "/tmp/napoleon-test.zip")
-        var fallbackAttachments: [URL] = []
-        var handoffCount = 0
-        var completionEvents: [String] = []
-
-        #expect(presentation.beginPreparation())
-        let task = Task { @MainActor in
-            await presentation.handOffPreparedReport(
-                attachment,
-                openFallback: {
-                    fallbackAttachments.append($0)
-                    completionEvents.append("fallback")
-                },
-                markHandedOff: {
-                    handoffCount += 1
-                    completionEvents.append("handoff")
-                }
-            )
-        }
-        await Task.yield()
-
-        #expect(performCount == 1)
-        #expect(retainedService != nil)
-        #expect(retainedService?.delegate != nil)
-        #expect(presentation.isPreparing)
-        #expect(presentation.beginPreparation() == false)
-        #expect(fallbackAttachments.isEmpty)
-        #expect(handoffCount == 0)
-
-        let service = try #require(retainedService)
-        composer.sharingService(
-            service,
-            didFailToShareItems: [attachment],
-            error: NSError(domain: "test", code: 1)
-        )
-        await task.value
-
-        #expect(fallbackAttachments == [attachment])
-        #expect(handoffCount == 1)
-        #expect(completionEvents == ["fallback", "handoff"])
-        #expect(service.delegate == nil)
-        #expect(presentation.requiresManualAttachment)
-        #expect(presentation.isPreparing == false)
-    }
-
-    @Test func didShareCompletesExactlyOneHandoffWithoutFallback() async {
-        let service = NSSharingService(
-            title: "Test Email",
-            image: NSImage(size: .init(width: 1, height: 1)),
-            alternateImage: nil,
-            handler: {}
-        )
-        let composer = EmailDraftComposer(
-            serviceProvider: { service },
-            canPerform: { _, _ in true },
-            perform: { _, _ in }
-        )
-        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
-        let attachment = URL(fileURLWithPath: "/tmp/napoleon-test.zip")
-        var fallbackCount = 0
-        var handoffCount = 0
-
-        #expect(presentation.selectIssue(.search))
-        #expect(presentation.beginPreparation())
-        let task = Task { @MainActor in
-            await presentation.handOffPreparedReport(
-                attachment,
-                openFallback: { _ in fallbackCount += 1 },
-                markHandedOff: { handoffCount += 1 }
-            )
-        }
-        await Task.yield()
-
-        #expect(handoffCount == 0)
-        composer.sharingService(service, didShareItems: [attachment])
-        composer.sharingService(service, didShareItems: [attachment])
-        await task.value
-
-        #expect(fallbackCount == 0)
-        #expect(handoffCount == 1)
-        #expect(presentation.selectedIssue == .general)
-        #expect(presentation.requiresManualAttachment == false)
-        #expect(presentation.isPreparing == false)
-    }
-
-    @Test func missingSharingServiceCallbackStopsWaitingWithoutClaimingHandoff() async {
-        let service = NSSharingService(
-            title: "Silent Email Client",
-            image: NSImage(size: .init(width: 1, height: 1)),
-            alternateImage: nil,
-            handler: {}
-        )
-        let composer = EmailDraftComposer(
-            serviceProvider: { service },
-            canPerform: { _, _ in true },
-            perform: { _, _ in },
-            confirmationTimeout: .milliseconds(10)
-        )
-        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
-        let attachment = URL(fileURLWithPath: "/tmp/napoleon-silent-client.zip")
-        var fallbackCount = 0
-        var handoffCount = 0
-
-        #expect(presentation.selectIssue(.search))
-        #expect(presentation.beginPreparation())
-        let task = Task { @MainActor in
-            await presentation.handOffPreparedReport(
-                attachment,
-                openFallback: { _ in fallbackCount += 1 },
-                markHandedOff: { handoffCount += 1 }
-            )
-        }
-
-        await task.value
-        #expect(presentation.isPreparing == false)
-        #expect(fallbackCount == 0)
-        #expect(handoffCount == 0)
-        #expect(presentation.selectedIssue == .search)
-        #expect(presentation.isRecordingSearchDetails)
-        #expect(presentation.unconfirmedAttachmentURL == attachment)
     }
 
     private func makeDiagnostics() -> DiagnosticsService {
