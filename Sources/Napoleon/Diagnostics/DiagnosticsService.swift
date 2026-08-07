@@ -1,5 +1,6 @@
 import Combine
 import CoreGraphics
+import Darwin
 import Dispatch
 import Foundation
 import ImageIO
@@ -223,6 +224,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
     private let directory: URL
     private let now: @Sendable () -> Date
+    private let closeAppendFile: @Sendable (FileHandle) throws -> Void
     private let queue = DispatchQueue(label: "com.ryekee.napoleon.search-diagnostics", qos: .utility)
     private var isActive = false
     private var storedEvents: [DiagnosticSearchEvent] = []
@@ -230,13 +232,18 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     private var latestTimestamp: Date?
     private var expiryTimer: DispatchSourceTimer?
     private var scheduledExpiryTimestamp: Date?
-    private var mostRecentFileError: Error?
-    private var fileContainsEvents = false
+    private var pendingFileError: Error?
+    private var fileIdentity: FileIdentity?
     private var fileNeedsRewrite = false
 
-    init(directory: URL, now: @escaping @Sendable () -> Date = { Date() }) {
+    init(
+        directory: URL,
+        now: @escaping @Sendable () -> Date = { Date() },
+        closeAppendFile: @escaping @Sendable (FileHandle) throws -> Void = { try $0.close() }
+    ) {
         self.directory = directory
         self.now = now
+        self.closeAppendFile = closeAppendFile
         fileURL = directory.appending(path: "search-diagnostics.jsonl", directoryHint: .notDirectory)
     }
 
@@ -247,11 +254,11 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             self.earliestTimestamp = nil
             self.latestTimestamp = nil
             self.cancelExpiryTimer()
-            self.mostRecentFileError = nil
-            self.fileContainsEvents = false
+            self.pendingFileError = nil
+            self.fileIdentity = nil
             self.fileNeedsRewrite = !self.removeFile()
             self.createDirectory()
-            self.fileNeedsRewrite = self.fileNeedsRewrite || self.mostRecentFileError != nil
+            self.fileNeedsRewrite = self.fileNeedsRewrite || self.pendingFileError != nil
         }
     }
 
@@ -286,7 +293,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
                 }
 
                 guard self.isActive else {
-                    if let error = self.mostRecentFileError {
+                    if let error = self.consumePendingFileError() {
                         continuation.resume(throwing: error)
                     } else {
                         continuation.resume(returning: [])
@@ -294,12 +301,17 @@ final class SearchDiagnosticStore: @unchecked Sendable {
                     return
                 }
 
+                let previousCount = self.storedEvents.count
                 self.removeEvents(olderThan: cutoff)
-                self.recomputeTimestampBounds()
-                self.writeEventsAtomically()
+                if self.storedEvents.count != previousCount {
+                    self.recomputeTimestampBounds()
+                    self.writeEventsAtomically()
+                } else if self.fileNeedsRewrite {
+                    self.writeEventsAtomically()
+                }
                 self.scheduleNextExpiry()
 
-                if let error = self.mostRecentFileError {
+                if let error = self.consumePendingFileError() {
                     continuation.resume(throwing: error)
                 } else {
                     continuation.resume(returning: self.storedEvents)
@@ -315,18 +327,28 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             self.earliestTimestamp = nil
             self.latestTimestamp = nil
             self.cancelExpiryTimer()
-            self.fileContainsEvents = false
+            self.fileIdentity = nil
             self.fileNeedsRewrite = !self.removeFile()
         }
     }
 
     private static let retentionInterval: TimeInterval = 7_200
 
+    private struct FileIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let length: Int64
+    }
+
+    private enum FileError: Error {
+        case unexpectedFile
+    }
+
     private func createDirectory() {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            mostRecentFileError = error
+            recordFileError(error)
         }
     }
 
@@ -338,7 +360,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
             return true
         } catch {
-            mostRecentFileError = error
+            recordFileError(error)
             return false
         }
     }
@@ -346,7 +368,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     // ponytail: 搜索诊断由用户临时启用，事件量按低千级上限处理；只有现场数据证明更大时才改分段文件。
     private func writeEventsAtomically() {
         guard !storedEvents.isEmpty else {
-            fileContainsEvents = false
+            fileIdentity = nil
             fileNeedsRewrite = !removeFile()
             return
         }
@@ -360,13 +382,12 @@ final class SearchDiagnosticStore: @unchecked Sendable {
                 data.append(try encoder.encode(event))
                 data.append(0x0A)
             }
-            try data.write(to: fileURL, options: .atomic)
-            fileContainsEvents = true
+            fileIdentity = try replaceFileAtomically(with: data)
             fileNeedsRewrite = false
-            mostRecentFileError = nil
         } catch {
+            fileIdentity = nil
             fileNeedsRewrite = true
-            mostRecentFileError = error
+            recordFileError(error)
         }
     }
 
@@ -374,23 +395,117 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         do {
             var data = try JSONEncoder().encode(event)
             data.append(0x0A)
-
-            if fileContainsEvents {
-                let handle = try FileHandle(forWritingTo: fileURL)
-                defer { try? handle.close() }
-                _ = try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            } else {
-                try data.write(to: fileURL)
-            }
-
-            fileContainsEvents = true
+            fileIdentity = try append(data)
             fileNeedsRewrite = false
-            mostRecentFileError = nil
         } catch {
+            recordFileError(error)
+            fileIdentity = nil
             fileNeedsRewrite = true
-            mostRecentFileError = error
+            writeEventsAtomically()
         }
+    }
+
+    private func append(_ data: Data) throws -> FileIdentity {
+        let flags = O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC
+        let descriptor: Int32
+        if fileIdentity == nil {
+            descriptor = Darwin.open(fileURL.path, flags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        } else {
+            descriptor = Darwin.open(fileURL.path, flags)
+        }
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        var closed = false
+        defer {
+            if !closed {
+                try? handle.close()
+            }
+        }
+
+        let before = try identity(for: descriptor)
+        if let fileIdentity {
+            guard before == fileIdentity else { throw FileError.unexpectedFile }
+        } else {
+            guard before.length == 0 else { throw FileError.unexpectedFile }
+        }
+
+        try handle.write(contentsOf: data)
+        let after = try identity(for: descriptor)
+        guard after.device == before.device,
+              after.inode == before.inode,
+              after.length == before.length + Int64(data.count) else {
+            throw FileError.unexpectedFile
+        }
+
+        try closeAppendFile(handle)
+        closed = true
+        return after
+    }
+
+    private func replaceFileAtomically(with data: Data) throws -> FileIdentity {
+        let temporaryURL = directory.appending(
+            path: ".search-diagnostics-\(UUID().uuidString).tmp",
+            directoryHint: .notDirectory
+        )
+        var renamed = false
+        defer {
+            if !renamed {
+                _ = Darwin.unlink(temporaryURL.path)
+            }
+        }
+
+        let descriptor = Darwin.open(
+            temporaryURL.path,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        var closed = false
+        defer {
+            if !closed {
+                try? handle.close()
+            }
+        }
+
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        let identity = try identity(for: descriptor)
+        guard identity.length == Int64(data.count) else { throw FileError.unexpectedFile }
+        try handle.close()
+        closed = true
+
+        guard Darwin.rename(temporaryURL.path, fileURL.path) == 0 else {
+            throw currentPOSIXError()
+        }
+        renamed = true
+        return identity
+    }
+
+    private func identity(for descriptor: Int32) throws -> FileIdentity {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else { throw currentPOSIXError() }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG else { throw FileError.unexpectedFile }
+        return FileIdentity(
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino),
+            length: metadata.st_size
+        )
+    }
+
+    private func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    private func recordFileError(_ error: Error) {
+        pendingFileError = error
+    }
+
+    private func consumePendingFileError() -> Error? {
+        defer { pendingFileError = nil }
+        return pendingFileError
     }
 
     private func removeEvents(olderThan cutoff: Date) {

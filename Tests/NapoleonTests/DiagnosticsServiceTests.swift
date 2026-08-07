@@ -133,6 +133,119 @@ import Testing
         #expect(secondInode == firstInode)
     }
 
+    @Test func deletedSearchFileIsRecoveredByTheSameAppend() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        try FileManager.default.removeItem(at: store.fileURL)
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        try await waitForSearchQueries(["first", "second"], at: store.fileURL)
+    }
+
+    @Test func truncatedSearchFileIsRecoveredByTheSameAppend() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        let handle = try FileHandle(forWritingTo: store.fileURL)
+        try handle.truncate(atOffset: 0)
+        try handle.close()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        try await waitForSearchQueries(["first", "second"], at: store.fileURL)
+    }
+
+    @Test func replacedSearchFileIsRecoveredByTheSameAppend() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        try Data("external replacement".utf8).write(to: store.fileURL, options: .atomic)
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        try await waitForSearchQueries(["first", "second"], at: store.fileURL)
+    }
+
+    @Test func symbolicLinkReplacementIsRecoveredWithoutTouchingItsTarget() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        let targetURL = store.fileURL.deletingLastPathComponent().appending(path: "external-target")
+        try Data("external target".utf8).write(to: targetURL)
+        try FileManager.default.removeItem(at: store.fileURL)
+        try FileManager.default.createSymbolicLink(at: store.fileURL, withDestinationURL: targetURL)
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        try await waitForSearchQueries(["first", "second"], at: store.fileURL)
+        #expect(try String(contentsOf: targetURL, encoding: .utf8) == "external target")
+        #expect(isSymbolicLink(at: store.fileURL) == false)
+    }
+
+    @Test func recoveredFileErrorIsReportedExactlyOnce() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        try FileManager.default.removeItem(at: store.fileURL)
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        var observedError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch {
+            observedError = true
+        }
+        #expect(observedError)
+
+        let events = try await store.events(since: .distantPast)
+        #expect(events.map(\.query) == ["first", "second"])
+    }
+
+    @Test func appendCloseErrorIsReportedAndRecovered() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let closeFailure = OneShotCloseFailure()
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { .searchDiagnosticTestNow },
+            closeAppendFile: closeFailure.close
+        )
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+
+        var observedError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch {
+            observedError = true
+        }
+        #expect(observedError)
+
+        let events = try await store.events(since: .distantPast)
+        #expect(events.map(\.query) == ["first"])
+        #expect(try readSearchEvents(at: store.fileURL) == events)
+    }
+
+    @Test func eventsWithoutCleanupKeepsTheSameFileIdentity() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+        let firstInode = try inode(at: store.fileURL)
+
+        _ = try await store.events(since: .distantPast)
+
+        #expect(try inode(at: store.fileURL) == firstInode)
+    }
+
     @Test func oneThousandAppendsRemainCompleteAndDecodable() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -148,16 +261,17 @@ import Testing
             ))
         }
 
+        try await waitForSearchLineCount(1_000, at: store.fileURL, attempts: 6_000)
+        let appendedEvents = try readSearchEvents(at: store.fileURL)
+        #expect(appendedEvents.count == 1_000)
+        #expect(appendedEvents.first?.query == "query-0")
+        #expect(appendedEvents.last?.query == "query-999")
+
         let events = try await store.events(since: .distantPast)
         #expect(events.count == 1_000)
         #expect(events.first?.query == "query-0")
         #expect(events.last?.query == "query-999")
-
-        let contents = try String(contentsOf: store.fileURL, encoding: .utf8)
-        let decodedEvents = try contents.split(separator: "\n").map {
-            try JSONDecoder().decode(DiagnosticSearchEvent.self, from: Data($0.utf8))
-        }
-        #expect(decodedEvents == events)
+        #expect(appendedEvents == events)
     }
 
     @MainActor @Test func generalReportExcludesSensitiveFilesAndTitles() async throws {
@@ -437,9 +551,36 @@ private extension DiagnosticSearchEvent {
     }
 }
 
+private extension Date {
+    static let searchDiagnosticTestNow = Date(timeIntervalSince1970: 20_000)
+}
+
 private enum SearchStoreTestError: Error {
     case missingInode
+    case injectedCloseFailure
     case timedOutWaitingForLineCount(Int)
+}
+
+private final class OneShotCloseFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFail = true
+
+    func close(_ handle: FileHandle) throws {
+        let failsNow = lock.withLock {
+            defer { shouldFail = false }
+            return shouldFail
+        }
+        if failsNow {
+            throw SearchStoreTestError.injectedCloseFailure
+        }
+        try handle.close()
+    }
+}
+
+private func makeSearchStore() -> SearchDiagnosticStore {
+    let directory = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    return SearchDiagnosticStore(directory: directory, now: { .searchDiagnosticTestNow })
 }
 
 private func inode(at fileURL: URL) throws -> UInt64 {
@@ -450,8 +591,12 @@ private func inode(at fileURL: URL) throws -> UInt64 {
     return inode.uint64Value
 }
 
-private func waitForSearchLineCount(_ expectedCount: Int, at fileURL: URL) async throws {
-    for _ in 0..<200 {
+private func waitForSearchLineCount(
+    _ expectedCount: Int,
+    at fileURL: URL,
+    attempts: Int = 200
+) async throws {
+    for _ in 0..<attempts {
         if let contents = try? String(contentsOf: fileURL, encoding: .utf8),
            contents.split(separator: "\n").count == expectedCount {
             return
@@ -459,4 +604,25 @@ private func waitForSearchLineCount(_ expectedCount: Int, at fileURL: URL) async
         try await Task.sleep(nanoseconds: 5_000_000)
     }
     throw SearchStoreTestError.timedOutWaitingForLineCount(expectedCount)
+}
+
+private func readSearchEvents(at fileURL: URL) throws -> [DiagnosticSearchEvent] {
+    let contents = try String(contentsOf: fileURL, encoding: .utf8)
+    return try contents.split(separator: "\n").map {
+        try JSONDecoder().decode(DiagnosticSearchEvent.self, from: Data($0.utf8))
+    }
+}
+
+private func waitForSearchQueries(_ queries: [String], at fileURL: URL) async throws {
+    for _ in 0..<200 {
+        if let events = try? readSearchEvents(at: fileURL), events.map(\.query) == queries {
+            return
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+    throw SearchStoreTestError.timedOutWaitingForLineCount(queries.count)
+}
+
+private func isSymbolicLink(at fileURL: URL) -> Bool {
+    (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil
 }
