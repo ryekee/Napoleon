@@ -165,6 +165,26 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: orphan.path))
     }
 
+    @Test func orphanRemovedBetweenInspectionAndUnlinkDoesNotReportError() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let orphan = managedSearchTemporaryURL(in: directory)
+        try Data("private".utf8).write(to: orphan)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            removeOrphanFile: { url in
+                try FileManager.default.removeItem(at: url)
+                throw POSIXError(.ENOENT)
+            }
+        )
+
+        store.discard()
+
+        #expect(try await store.events(since: .distantPast).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: orphan.path) == false)
+    }
+
     @Test func atomicRewriteReportsPrimaryErrorBeforeTemporaryCleanupFailure() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)

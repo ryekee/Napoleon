@@ -408,6 +408,8 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
             do {
                 try removeOrphanFile(child)
+            } catch let error as POSIXError where error.code == .ENOENT {
+                continue
             } catch {
                 recordFileError(error)
             }
