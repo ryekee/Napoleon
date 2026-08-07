@@ -1,6 +1,56 @@
 import AppKit
 import SwiftUI
 
+/// About 页诊断入口的持久展示状态。
+///
+/// 本对象由 `AppServices` 持有，不随 `SettingsView` 切页销毁：这样生成期间即使
+/// AboutView 被重建，新视图仍会看到同一把单飞锁，不能启动第二份报告。
+@MainActor
+final class AboutDiagnosticsPresentation: ObservableObject {
+    enum Completion {
+        case handedOff(requiresManualAttachment: Bool)
+        case failed(String)
+    }
+
+    @Published private(set) var selectedIssue: DiagnosticIssue = .default
+    @Published private(set) var isPreparing = false
+    @Published private(set) var error: String?
+    @Published private(set) var requiresManualAttachment = false
+
+    @discardableResult
+    func selectIssue(_ issue: DiagnosticIssue) -> Bool {
+        guard !isPreparing else { return false }
+        selectedIssue = issue
+        error = nil
+        requiresManualAttachment = false
+        return true
+    }
+
+    /// MainActor 上同步完成 check-and-set，因此重建后的视图也无法穿透生成锁。
+    func beginPreparation() -> Bool {
+        guard !isPreparing else { return false }
+        isPreparing = true
+        error = nil
+        requiresManualAttachment = false
+        return true
+    }
+
+    func finishPreparation(_ completion: Completion) {
+        guard isPreparing else { return }
+        defer { isPreparing = false }
+
+        switch completion {
+        case .handedOff(let requiresManualAttachment):
+            selectedIssue = .general
+            error = nil
+            self.requiresManualAttachment = requiresManualAttachment
+        case .failed(let message):
+            error = message
+            requiresManualAttachment = false
+        }
+    }
+}
+
 /// 设置窗口的「关于」页：应用名 / 图标 / 版本 + 检查更新。
 ///
 /// 更新只做「检查」——发现新版打开 GitHub Release 页面让用户自行下载，不自动下载安装
@@ -8,11 +58,7 @@ import SwiftUI
 struct AboutView: View {
     @ObservedObject var updateChecker: UpdateChecker
     @ObservedObject var diagnostics: DiagnosticsService
-
-    @State private var selectedIssue: DiagnosticIssue = .default
-    @State private var preparingDiagnostics = false
-    @State private var diagnosticsError: String?
-    @State private var attachmentNeedsManualAddition = false
+    @ObservedObject var presentation: AboutDiagnosticsPresentation
 
     /// App 图标。
     ///
@@ -37,7 +83,6 @@ struct AboutView: View {
         // （见 `SettingsWindowController.resizeWindow`）。写 `maxHeight: .infinity` 会让
         // `fittingSize` 报出一个被撑大的值，「关于」页底部就会留一大片空白。
         .frame(maxWidth: .infinity, alignment: .top)
-        .onAppear { diagnostics.selectIssue(selectedIssue) }
     }
 
     // MARK: - 应用身份
@@ -145,19 +190,17 @@ struct AboutView: View {
                 .font(.headline)
 
             Picker("Issue to diagnose", selection: Binding(
-                get: { selectedIssue },
+                get: { presentation.selectedIssue },
                 set: { newIssue in
-                    selectedIssue = newIssue
+                    guard presentation.selectIssue(newIssue) else { return }
                     diagnostics.selectIssue(newIssue)
-                    diagnosticsError = nil
-                    attachmentNeedsManualAddition = false
                 }
             )) {
                 ForEach(DiagnosticIssue.allCases) { issue in
                     Text(issueTitle(issue)).tag(issue)
                 }
             }
-            .disabled(preparingDiagnostics)
+            .disabled(presentation.isPreparing)
 
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "hand.raised")
@@ -172,7 +215,7 @@ struct AboutView: View {
             HStack(alignment: .top, spacing: 12) {
                 Button(action: prepareDiagnosticsEmail) {
                     HStack(spacing: 6) {
-                        if preparingDiagnostics {
+                        if presentation.isPreparing {
                             ProgressView()
                                 .controlSize(.small)
                             Text("Preparing…")
@@ -183,7 +226,7 @@ struct AboutView: View {
                     .frame(width: 140)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(preparingDiagnostics)
+                .disabled(presentation.isPreparing)
 
                 diagnosticsStatus
                     .font(.caption)
@@ -202,7 +245,7 @@ struct AboutView: View {
     }
 
     private var issuePrivacyDescription: LocalizedStringKey {
-        switch selectedIssue {
+        switch presentation.selectedIssue {
         case .general:
             "Includes app names, Bundle IDs, window counts and IDs, permission states, hotkey events, durations, and error codes. Excludes window titles, searches, file paths, and images."
         case .search:
@@ -214,10 +257,10 @@ struct AboutView: View {
 
     @ViewBuilder
     private var diagnosticsStatus: some View {
-        if let diagnosticsError {
-            Text(diagnosticsError)
+        if let error = presentation.error {
+            Text(error)
                 .foregroundStyle(.red)
-        } else if attachmentNeedsManualAddition {
+        } else if presentation.requiresManualAttachment {
             Text("Could not attach the ZIP automatically. Add it to the email draft from Finder.")
                 .foregroundStyle(.orange)
         } else {
@@ -227,38 +270,46 @@ struct AboutView: View {
     }
 
     private func prepareDiagnosticsEmail() {
-        guard !preparingDiagnostics else { return }
-        preparingDiagnostics = true
-        diagnosticsError = nil
-        attachmentNeedsManualAddition = false
+        let diagnostics = diagnostics
+        let presentation = presentation
+        guard presentation.beginPreparation() else { return }
 
-        Task {
+        Task { @MainActor [diagnostics, presentation] in
             do {
                 let attachment = try await diagnostics.prepareReport()
-                if !composeEmail(attachment: attachment) {
-                    NSWorkspace.shared.activateFileViewerSelecting([attachment])
-                    if let draftURL = URL(string: "mailto:hi@ryek.ee?subject=Napoleon%20diagnostics") {
-                        NSWorkspace.shared.open(draftURL)
-                    }
-                    attachmentNeedsManualAddition = true
+                let requiresManualAttachment = !Self.composeEmail(attachment: attachment)
+                if requiresManualAttachment {
+                    Self.openManualAttachmentFallback(attachment: attachment)
                 }
                 diagnostics.reportWasHandedOff()
-                selectedIssue = .general
+                presentation.finishPreparation(
+                    .handedOff(requiresManualAttachment: requiresManualAttachment)
+                )
             } catch {
-                diagnosticsError = String(
-                    format: String(localized: "Could not prepare diagnostics: %@"),
-                    error.localizedDescription
+                presentation.finishPreparation(
+                    .failed(
+                        String(
+                            format: String(localized: "Could not prepare diagnostics: %@"),
+                            error.localizedDescription
+                        )
+                    )
                 )
             }
-            preparingDiagnostics = false
         }
     }
 
-    private func composeEmail(attachment: URL) -> Bool {
+    private static func composeEmail(attachment: URL) -> Bool {
         guard let service = NSSharingService(named: .composeEmail) else { return false }
         service.recipients = ["hi@ryek.ee"]
         service.subject = "Napoleon diagnostics"
         service.perform(withItems: [attachment])
         return true
+    }
+
+    private static func openManualAttachmentFallback(attachment: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([attachment])
+        if let draftURL = URL(string: "mailto:hi@ryek.ee?subject=Napoleon%20diagnostics") {
+            NSWorkspace.shared.open(draftURL)
+        }
     }
 }

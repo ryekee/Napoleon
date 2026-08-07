@@ -19,6 +19,7 @@ struct SettingsView: View {
     @ObservedObject var loginItem: LoginItemController
     @ObservedObject var updateChecker: UpdateChecker
     @ObservedObject var diagnostics: DiagnosticsService
+    @ObservedObject var aboutDiagnosticsPresentation: AboutDiagnosticsPresentation
 
     /// 「立即重启」失败时的原因（`nil` = 没失败过）。见 `relaunch()`。
     @State private var relaunchError: String?
@@ -39,7 +40,12 @@ struct SettingsView: View {
                 case .general: generalTab
                 case .appearance: appearanceTab
                 case .permissions: permissionsTab
-                case .about: AboutView(updateChecker: updateChecker, diagnostics: diagnostics)
+                case .about:
+                    AboutView(
+                        updateChecker: updateChecker,
+                        diagnostics: diagnostics,
+                        presentation: aboutDiagnosticsPresentation
+                    )
                 }
             }
             .fixedSize(horizontal: false, vertical: true)

@@ -26,6 +26,7 @@ final class AppServices {
     let permissions = PermissionsManager()
     let loginItem = LoginItemController()
     let updateChecker = UpdateChecker()
+    let aboutDiagnosticsPresentation = AboutDiagnosticsPresentation()
 
     let hotkey: HotkeyManager
     /// 用持久化的缓存上限构造（而不是先吃 `ThumbnailService` 的 32MB 默认值再等设置界面
@@ -114,7 +115,8 @@ final class AppServices {
 
         // 设置窗口内容延迟到真正打开时才构造（`makeContent` 是闭包）——绝大多数启动用户根本
         // 不会打开设置，没必要在启动路径上付 SwiftUI 首次布局的成本。
-        let settingsWindow = SettingsWindowController { [settings, permissions, loginItem, updateChecker, diagnostics] navigation in
+        let settingsWindow = SettingsWindowController {
+            [settings, permissions, loginItem, updateChecker, diagnostics, aboutDiagnosticsPresentation] navigation in
             AnyView(
                 SettingsView(
                     navigation: navigation,
@@ -122,7 +124,8 @@ final class AppServices {
                     permissions: permissions,
                     loginItem: loginItem,
                     updateChecker: updateChecker,
-                    diagnostics: diagnostics
+                    diagnostics: diagnostics,
+                    aboutDiagnosticsPresentation: aboutDiagnosticsPresentation
                 )
             )
         }
