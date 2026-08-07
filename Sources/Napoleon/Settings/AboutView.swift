@@ -11,6 +11,7 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
         case shared
         case unavailableOrFailed
         case cancelled
+        case unconfirmed
     }
 
     typealias ServiceProvider = @MainActor () -> NSSharingService?
@@ -20,6 +21,7 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
     private let serviceProvider: ServiceProvider
     private let canPerform: CanPerform
     private let perform: Perform
+    private let confirmationTimeout: Duration
     private var retainedService: NSSharingService?
     private var continuation: CheckedContinuation<Result, Never>?
     private var confirmationTask: Task<Void, Never>?
@@ -33,11 +35,13 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
         },
         perform: @escaping Perform = { service, items in
             service.perform(withItems: items)
-        }
+        },
+        confirmationTimeout: Duration = .seconds(2)
     ) {
         self.serviceProvider = serviceProvider
         self.canPerform = canPerform
         self.perform = perform
+        self.confirmationTimeout = confirmationTimeout
     }
 
     func compose(attachment: URL) async -> Result {
@@ -62,16 +66,16 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
             service.delegate = self
             service.recipients = ["hi@ryek.ee"]
             service.subject = "Napoleon diagnostics"
-            perform(service, items)
 
             // 第三方邮件客户端可能已经打开带附件草稿，却始终不触发 delegate 回调。
-            // `perform` 已被系统服务接受后给客户端 2 秒启动时间；超时只代表附件已交接，
-            // 不代表用户发送了邮件。ZIP 本身仍按 2 小时策略保留。
+            // 超时只停止等待并保留 ZIP，不把未确认状态误报为交接成功。
             confirmationTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(2))
+                guard let self else { return }
+                try? await Task.sleep(for: confirmationTimeout)
                 guard !Task.isCancelled else { return }
-                self?.resolve(.shared)
+                resolve(.unconfirmed)
             }
+            perform(service, items)
         }
     }
 
@@ -114,6 +118,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
     enum Completion {
         case handedOff(requiresManualAttachment: Bool)
         case cancelled
+        case unconfirmed(URL)
         case failed(String)
     }
 
@@ -122,6 +127,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var requiresManualAttachment = false
     @Published private(set) var emailDraftWasCancelled = false
+    @Published private(set) var unconfirmedAttachmentURL: URL?
 
     var isRecordingSearchDetails: Bool {
         selectedIssue == .search
@@ -140,6 +146,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         error = nil
         requiresManualAttachment = false
         emailDraftWasCancelled = false
+        unconfirmedAttachmentURL = nil
         return true
     }
 
@@ -150,6 +157,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         error = nil
         requiresManualAttachment = false
         emailDraftWasCancelled = false
+        unconfirmedAttachmentURL = nil
         return true
     }
 
@@ -163,14 +171,22 @@ final class AboutDiagnosticsPresentation: ObservableObject {
             error = nil
             self.requiresManualAttachment = requiresManualAttachment
             emailDraftWasCancelled = false
+            unconfirmedAttachmentURL = nil
         case .cancelled:
             error = nil
             requiresManualAttachment = false
             emailDraftWasCancelled = true
+            unconfirmedAttachmentURL = nil
+        case .unconfirmed(let attachment):
+            error = nil
+            requiresManualAttachment = false
+            emailDraftWasCancelled = false
+            unconfirmedAttachmentURL = attachment
         case .failed(let message):
             error = message
             requiresManualAttachment = false
             emailDraftWasCancelled = false
+            unconfirmedAttachmentURL = nil
         }
     }
 
@@ -215,6 +231,8 @@ final class AboutDiagnosticsPresentation: ObservableObject {
             finishPreparation(.handedOff(requiresManualAttachment: true))
         case .cancelled:
             finishPreparation(.cancelled)
+        case .unconfirmed:
+            finishPreparation(.unconfirmed(attachment))
         }
     }
 }
@@ -433,6 +451,15 @@ struct AboutView: View {
         } else if presentation.emailDraftWasCancelled {
             Text("Email draft cancelled; the ZIP will remain on this Mac for up to two hours.")
                 .foregroundStyle(.secondary)
+        } else if let attachment = presentation.unconfirmedAttachmentURL {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.")
+                    .foregroundStyle(.secondary)
+                Button("Show ZIP in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([attachment])
+                }
+                .buttonStyle(.link)
+            }
         } else {
             Text("Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.")
                 .foregroundStyle(.secondary)

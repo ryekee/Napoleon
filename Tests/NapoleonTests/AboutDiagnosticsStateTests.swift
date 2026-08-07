@@ -83,6 +83,24 @@ import Testing
                 ]
             ),
             (
+                "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.",
+                [
+                    "en": "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.",
+                    "zh-Hans": "邮件客户端未确认草稿。ZIP 最多在本机保留两小时。",
+                    "zh-Hant": "郵件用戶端未確認草稿。ZIP 最多會在此 Mac 保留兩小時。",
+                    "ja": "メールクライアントから下書きの確認を受け取れませんでした。ZIP はこの Mac に最長2時間保持されます。"
+                ]
+            ),
+            (
+                "Show ZIP in Finder",
+                [
+                    "en": "Show ZIP in Finder",
+                    "zh-Hans": "在访达中显示 ZIP",
+                    "zh-Hant": "在 Finder 中顯示 ZIP",
+                    "ja": "Finder で ZIP を表示"
+                ]
+            ),
+            (
                 "A diagnostic report is already being prepared.",
                 [
                     "en": "A diagnostic report is already being prepared.",
@@ -341,7 +359,7 @@ import Testing
         #expect(presentation.isPreparing == false)
     }
 
-    @Test func missingSharingServiceCallbackDoesNotLeavePreparationStuck() async throws {
+    @Test func missingSharingServiceCallbackStopsWaitingWithoutClaimingHandoff() async throws {
         let service = NSSharingService(
             title: "Silent Email Client",
             image: NSImage(size: .init(width: 1, height: 1)),
@@ -351,13 +369,15 @@ import Testing
         let composer = EmailDraftComposer(
             serviceProvider: { service },
             canPerform: { _, _ in true },
-            perform: { _, _ in }
+            perform: { _, _ in },
+            confirmationTimeout: .milliseconds(10)
         )
         let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
         let attachment = URL(fileURLWithPath: "/tmp/napoleon-silent-client.zip")
         var fallbackCount = 0
         var handoffCount = 0
 
+        #expect(presentation.selectIssue(.search))
         #expect(presentation.beginPreparation())
         let task = Task { @MainActor in
             await presentation.handOffPreparedReport(
@@ -367,13 +387,13 @@ import Testing
             )
         }
 
-        try await Task.sleep(for: .seconds(2.5))
+        try await Task.sleep(for: .milliseconds(50))
         #expect(presentation.isPreparing == false)
         #expect(fallbackCount == 0)
-        #expect(handoffCount == 1)
-
-        // 当前实现若仍在等待，主动结束 continuation，避免失败用例悬挂测试进程。
-        composer.sharingService(service, didShareItems: [attachment])
+        #expect(handoffCount == 0)
+        #expect(presentation.selectedIssue == .search)
+        #expect(presentation.isRecordingSearchDetails)
+        #expect(presentation.unconfirmedAttachmentURL == attachment)
         await task.value
     }
 

@@ -262,6 +262,64 @@
         }
       }
     },
+    "Show ZIP in Finder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show ZIP in Finder"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在访达中显示 ZIP"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 Finder 中顯示 ZIP"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finder で ZIP を表示"
+          }
+        }
+      }
+    },
+    "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The email client did not confirm the draft. The ZIP will remain on this Mac for up to two hours."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邮件客户端未确认草稿。ZIP 最多在本机保留两小时。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "郵件用戶端未確認草稿。ZIP 最多會在此 Mac 保留兩小時。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メールクライアントから下書きの確認を受け取れませんでした。ZIP はこの Mac に最長2時間保持されます。"
+          }
+        }
+      }
+    },
     "General issue": {
       "extractionState": "manual",
       "localizations": {
