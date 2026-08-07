@@ -474,12 +474,18 @@ final class DiagnosticsService: ObservableObject {
     func prepareReport() async throws -> URL {
         let report = try await prepareReportDirectory()
         let zipURL = report.appendingPathExtension("zip")
-        try await commands.zip(report, zipURL)
+        do {
+            try await commands.zip(report, zipURL)
+        } catch {
+            try? FileManager.default.removeItem(at: zipURL)
+            throw error
+        }
         return zipURL
     }
 
     func reportWasHandedOff() {
         searchStore.discard()
+        selectedIssue = .general
         guard let lastWorkingDirectory else { return }
         self.lastWorkingDirectory = nil
         Task.detached(priority: .utility) {
@@ -523,8 +529,10 @@ final class DiagnosticsService: ObservableObject {
         try encoder.encode(snapshot).write(to: report.appending(path: "state.json"), options: .atomic)
 
         if issue.includesSearch {
+            let lineEncoder = JSONEncoder()
+            lineEncoder.outputFormatting = [.sortedKeys]
             let lines = try searchEvents.map { event in
-                String(decoding: try encoder.encode(event), as: UTF8.self)
+                String(decoding: try lineEncoder.encode(event), as: UTF8.self)
             }
             try Data(lines.joined(separator: "\n").utf8)
                 .write(to: report.appending(path: "search.jsonl"), options: .atomic)
@@ -540,9 +548,11 @@ final class DiagnosticsService: ObservableObject {
             try fileManager.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: false)
             for windowID in thumbnails.keys.sorted() {
                 guard let image = thumbnails[windowID] else { continue }
+                let imageURL = thumbnailDirectory.appending(path: "\(windowID).png")
                 do {
-                    try commands.encodePNG(image, thumbnailDirectory.appending(path: "\(windowID).png"))
+                    try commands.encodePNG(image, imageURL)
                 } catch {
+                    try? fileManager.removeItem(at: imageURL)
                     failedThumbnailWindowIDs.append(windowID)
                 }
             }

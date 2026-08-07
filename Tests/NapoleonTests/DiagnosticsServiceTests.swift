@@ -128,6 +128,17 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails").path) == false)
     }
 
+    @MainActor @Test func searchReportWritesOneDecodableEventPerLine() async throws {
+        let report = try await makeService(issue: .search, query: "f").prepareReportDirectory()
+        let contents = try String(contentsOf: report.appending(path: "search.jsonl"), encoding: .utf8)
+        let lines = contents.split(separator: "\n")
+
+        #expect(lines.count == 1)
+        let event = try JSONDecoder().decode(DiagnosticSearchEvent.self, from: Data(lines[0].utf8))
+        #expect(event.query == "f")
+        #expect(event.results.map(\.windowTitle) == ["Secret A"])
+    }
+
     @MainActor @Test func thumbnailReportUsesOnlyCacheHits() async throws {
         let service = try await makeService(issue: .thumbnail, cachedIDs: [42])
         let report = try await service.prepareReportDirectory()
@@ -192,7 +203,10 @@ import Testing
         let commands = DiagnosticCommands(
             exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
             encodePNG: { image, url in
-                if url.lastPathComponent == "42.png" { throw StubError.failed }
+                if url.lastPathComponent == "42.png" {
+                    try Data("partial png".utf8).write(to: url)
+                    throw StubError.failed
+                }
                 try DiagnosticCommands.live.encodePNG(image, url)
             },
             zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
@@ -200,6 +214,7 @@ import Testing
         let service = try await makeService(issue: .thumbnail, cachedIDs: [42, 43], commands: commands)
         let report = try await service.prepareReportDirectory()
         #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails/43.png").path))
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails/42.png").path) == false)
         #expect(try manifest(at: report).failedThumbnailWindowIDs == [42])
     }
 
@@ -221,7 +236,10 @@ import Testing
             commands: .init(
                 exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
                 encodePNG: DiagnosticCommands.live.encodePNG,
-                zip: { _, _ in throw StubError.failed }
+                zip: { _, zipURL in
+                    try Data("partial zip".utf8).write(to: zipURL)
+                    throw StubError.failed
+                }
             ),
             now: { Date(timeIntervalSince1970: 10_000) }
         )
@@ -231,6 +249,42 @@ import Testing
             includingPropertiesForKeys: nil
         )
         #expect(children.contains { $0.hasDirectoryPath })
+        #expect(children.contains { $0.pathExtension == "zip" } == false)
+    }
+
+    @MainActor @Test func handoffAllowsSearchToBeExplicitlyEnabledAgain() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let searchStore = SearchDiagnosticStore(directory: directory)
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+            ),
+            searchStore: searchStore,
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+        let window = WindowInfo(
+            id: 42,
+            pid: 10,
+            appName: "Finder",
+            appBundleID: "com.apple.finder",
+            title: "Secret A"
+        )
+
+        service.selectIssue(.search)
+        service.recordSearch(query: "first", results: [window])
+        _ = try await service.prepareReport()
+        service.reportWasHandedOff()
+
+        service.selectIssue(.search)
+        service.recordSearch(query: "second", results: [window])
+        let events = try await searchStore.events(since: .distantPast)
+        #expect(events.map(\.query) == ["second"])
     }
 }
 
