@@ -1,6 +1,80 @@
 import AppKit
 import SwiftUI
 
+/// 把 `NSSharingServiceDelegate` 回调桥接成可等待的邮件草稿交接结果。
+///
+/// `NSSharingService.delegate` 是 weak，而 `perform(withItems:)` 的成功/失败又在之后异步回调；
+/// 因此本对象在回调前强持有 service，自身则由稳定的 presentation 持有。
+@MainActor
+final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
+    enum Result: Equatable {
+        case shared
+        case failed
+    }
+
+    typealias ServiceProvider = @MainActor () -> NSSharingService?
+    typealias Perform = @MainActor (NSSharingService, [Any]) -> Void
+
+    private let serviceProvider: ServiceProvider
+    private let perform: Perform
+    private var retainedService: NSSharingService?
+    private var continuation: CheckedContinuation<Result, Never>?
+
+    init(
+        serviceProvider: @escaping ServiceProvider = {
+            NSSharingService(named: .composeEmail)
+        },
+        perform: @escaping Perform = { service, items in
+            service.perform(withItems: items)
+        }
+    ) {
+        self.serviceProvider = serviceProvider
+        self.perform = perform
+    }
+
+    func compose(attachment: URL) async -> Result {
+        // 上层 presentation 已保证单飞；这里再拒绝意外的并发调用，
+        // 避免新 continuation 覆盖仍在等回调的旧 continuation。
+        guard continuation == nil else { return .failed }
+
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            guard let service = serviceProvider() else {
+                resolve(.failed)
+                return
+            }
+
+            retainedService = service
+            service.delegate = self
+            service.recipients = ["hi@ryek.ee"]
+            service.subject = "Napoleon diagnostics"
+            perform(service, [attachment])
+        }
+    }
+
+    func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
+        guard sharingService === retainedService else { return }
+        resolve(.shared)
+    }
+
+    func sharingService(
+        _ sharingService: NSSharingService,
+        didFailToShareItems items: [Any],
+        error: any Error
+    ) {
+        guard sharingService === retainedService else { return }
+        resolve(.failed)
+    }
+
+    private func resolve(_ result: Result) {
+        guard let continuation else { return }
+        self.continuation = nil
+        retainedService?.delegate = nil
+        retainedService = nil
+        continuation.resume(returning: result)
+    }
+}
+
 /// About 页诊断入口的持久展示状态。
 ///
 /// 本对象由 `AppServices` 持有，不随 `SettingsView` 切页销毁：这样生成期间即使
@@ -16,6 +90,12 @@ final class AboutDiagnosticsPresentation: ObservableObject {
     @Published private(set) var isPreparing = false
     @Published private(set) var error: String?
     @Published private(set) var requiresManualAttachment = false
+
+    private let emailComposer: EmailDraftComposer
+
+    init(emailComposer: EmailDraftComposer? = nil) {
+        self.emailComposer = emailComposer ?? EmailDraftComposer()
+    }
 
     @discardableResult
     func selectIssue(_ issue: DiagnosticIssue) -> Bool {
@@ -48,6 +128,25 @@ final class AboutDiagnosticsPresentation: ObservableObject {
             error = message
             requiresManualAttachment = false
         }
+    }
+
+    /// 只有 sharing service 回调 `didShareItems` 才视为系统邮件交接成功。
+    /// `didFailToShareItems` 或系统没有 Email service 时先进入手动附件 fallback，
+    /// 然后才统一清理原始报告状态。两条路径都不代表用户最终点击了 Send。
+    func handOffPreparedReport(
+        _ attachment: URL,
+        openFallback: @MainActor (URL) -> Void,
+        markHandedOff: @MainActor () -> Void
+    ) async {
+        guard isPreparing else { return }
+
+        let result = await emailComposer.compose(attachment: attachment)
+        let requiresManualAttachment = result == .failed
+        if requiresManualAttachment {
+            openFallback(attachment)
+        }
+        markHandedOff()
+        finishPreparation(.handedOff(requiresManualAttachment: requiresManualAttachment))
     }
 }
 
@@ -264,7 +363,7 @@ struct AboutView: View {
             Text("Could not attach the ZIP automatically. Add it to the email draft from Finder.")
                 .foregroundStyle(.orange)
         } else {
-            Text("No logs are uploaded automatically. Review the email before sending.")
+            Text("Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.")
                 .foregroundStyle(.secondary)
         }
     }
@@ -277,13 +376,10 @@ struct AboutView: View {
         Task { @MainActor [diagnostics, presentation] in
             do {
                 let attachment = try await diagnostics.prepareReport()
-                let requiresManualAttachment = !Self.composeEmail(attachment: attachment)
-                if requiresManualAttachment {
-                    Self.openManualAttachmentFallback(attachment: attachment)
-                }
-                diagnostics.reportWasHandedOff()
-                presentation.finishPreparation(
-                    .handedOff(requiresManualAttachment: requiresManualAttachment)
+                await presentation.handOffPreparedReport(
+                    attachment,
+                    openFallback: Self.openManualAttachmentFallback,
+                    markHandedOff: { diagnostics.reportWasHandedOff() }
                 )
             } catch {
                 presentation.finishPreparation(
@@ -296,14 +392,6 @@ struct AboutView: View {
                 )
             }
         }
-    }
-
-    private static func composeEmail(attachment: URL) -> Bool {
-        guard let service = NSSharingService(named: .composeEmail) else { return false }
-        service.recipients = ["hi@ryek.ee"]
-        service.subject = "Napoleon diagnostics"
-        service.perform(withItems: [attachment])
-        return true
     }
 
     private static func openManualAttachmentFallback(attachment: URL) {

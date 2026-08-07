@@ -233,31 +233,31 @@
         }
       }
     },
-    "No logs are uploaded automatically. Review the email before sending.": {
+    "Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No logs are uploaded automatically. Review the email before sending."
+            "value": "Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "日志不会自动上传，请在发送前检查邮件。"
+            "value": "Napoleon 不会直接上传日志。您的邮件客户端可能会同步邮件草稿和附件，请在发送前检查邮件。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "日誌不會自動上傳，請在傳送前檢查郵件。"
+            "value": "Napoleon 不會直接上傳日誌。您的郵件用戶端可能會同步郵件草稿與附件，請在傳送前檢查郵件。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ログは自動送信されません。送信前にメールを確認してください。"
+            "value": "Napoleon がログを直接アップロードすることはありません。メールクライアントが下書きと添付ファイルを同期する場合があります。送信前にメールを確認してください。"
           }
         }
       }
