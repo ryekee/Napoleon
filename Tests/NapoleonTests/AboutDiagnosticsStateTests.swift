@@ -341,6 +341,42 @@ import Testing
         #expect(presentation.isPreparing == false)
     }
 
+    @Test func missingSharingServiceCallbackDoesNotLeavePreparationStuck() async throws {
+        let service = NSSharingService(
+            title: "Silent Email Client",
+            image: NSImage(size: .init(width: 1, height: 1)),
+            alternateImage: nil,
+            handler: {}
+        )
+        let composer = EmailDraftComposer(
+            serviceProvider: { service },
+            canPerform: { _, _ in true },
+            perform: { _, _ in }
+        )
+        let presentation = AboutDiagnosticsPresentation(emailComposer: composer)
+        let attachment = URL(fileURLWithPath: "/tmp/napoleon-silent-client.zip")
+        var fallbackCount = 0
+        var handoffCount = 0
+
+        #expect(presentation.beginPreparation())
+        let task = Task { @MainActor in
+            await presentation.handOffPreparedReport(
+                attachment,
+                openFallback: { _ in fallbackCount += 1 },
+                markHandedOff: { handoffCount += 1 }
+            )
+        }
+
+        try await Task.sleep(for: .seconds(2.5))
+        #expect(presentation.isPreparing == false)
+        #expect(fallbackCount == 0)
+        #expect(handoffCount == 1)
+
+        // 当前实现若仍在等待，主动结束 continuation，避免失败用例悬挂测试进程。
+        composer.sharingService(service, didShareItems: [attachment])
+        await task.value
+    }
+
     private func makeDiagnostics() -> DiagnosticsService {
         DiagnosticsService(
             directory: FileManager.default.temporaryDirectory

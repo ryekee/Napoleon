@@ -22,6 +22,7 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
     private let perform: Perform
     private var retainedService: NSSharingService?
     private var continuation: CheckedContinuation<Result, Never>?
+    private var confirmationTask: Task<Void, Never>?
 
     init(
         serviceProvider: @escaping ServiceProvider = {
@@ -62,6 +63,15 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
             service.recipients = ["hi@ryek.ee"]
             service.subject = "Napoleon diagnostics"
             perform(service, items)
+
+            // 第三方邮件客户端可能已经打开带附件草稿，却始终不触发 delegate 回调。
+            // `perform` 已被系统服务接受后给客户端 2 秒启动时间；超时只代表附件已交接，
+            // 不代表用户发送了邮件。ZIP 本身仍按 2 小时策略保留。
+            confirmationTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                self?.resolve(.shared)
+            }
         }
     }
 
@@ -87,6 +97,8 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
     private func resolve(_ result: Result) {
         guard let continuation else { return }
         self.continuation = nil
+        confirmationTask?.cancel()
+        confirmationTask = nil
         retainedService?.delegate = nil
         retainedService = nil
         continuation.resume(returning: result)
