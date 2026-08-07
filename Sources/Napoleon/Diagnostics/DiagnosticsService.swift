@@ -226,8 +226,13 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.ryekee.napoleon.search-diagnostics", qos: .utility)
     private var isActive = false
     private var storedEvents: [DiagnosticSearchEvent] = []
+    private var earliestTimestamp: Date?
+    private var latestTimestamp: Date?
     private var expiryTimer: DispatchSourceTimer?
+    private var scheduledExpiryTimestamp: Date?
     private var mostRecentFileError: Error?
+    private var fileContainsEvents = false
+    private var fileNeedsRewrite = false
 
     init(directory: URL, now: @escaping @Sendable () -> Date = { Date() }) {
         self.directory = directory
@@ -239,10 +244,14 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         queue.async {
             self.isActive = true
             self.storedEvents.removeAll()
+            self.earliestTimestamp = nil
+            self.latestTimestamp = nil
             self.cancelExpiryTimer()
             self.mostRecentFileError = nil
-            self.removeFile()
+            self.fileContainsEvents = false
+            self.fileNeedsRewrite = !self.removeFile()
             self.createDirectory()
+            self.fileNeedsRewrite = self.fileNeedsRewrite || self.mostRecentFileError != nil
         }
     }
 
@@ -251,10 +260,19 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             guard self.isActive else { return }
 
             self.storedEvents.append(event)
-            if let newestTimestamp = self.storedEvents.map(\.timestamp).max() {
-                self.removeEvents(olderThan: newestTimestamp.addingTimeInterval(-Self.retentionInterval))
+            self.updateTimestampBounds(adding: event.timestamp)
+
+            let retentionCutoff = self.latestTimestamp?.addingTimeInterval(-Self.retentionInterval)
+            if let retentionCutoff,
+               self.earliestTimestamp.map({ $0 < retentionCutoff }) == true {
+                self.removeEvents(olderThan: retentionCutoff)
+                self.recomputeTimestampBounds()
+                self.writeEventsAtomically()
+            } else if self.fileNeedsRewrite {
+                self.writeEventsAtomically()
+            } else {
+                self.appendEventLine(event)
             }
-            self.writeEvents()
             self.scheduleNextExpiry()
         }
     }
@@ -277,7 +295,8 @@ final class SearchDiagnosticStore: @unchecked Sendable {
                 }
 
                 self.removeEvents(olderThan: cutoff)
-                self.writeEvents()
+                self.recomputeTimestampBounds()
+                self.writeEventsAtomically()
                 self.scheduleNextExpiry()
 
                 if let error = self.mostRecentFileError {
@@ -293,8 +312,11 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         queue.async {
             self.isActive = false
             self.storedEvents.removeAll()
+            self.earliestTimestamp = nil
+            self.latestTimestamp = nil
             self.cancelExpiryTimer()
-            self.removeFile()
+            self.fileContainsEvents = false
+            self.fileNeedsRewrite = !self.removeFile()
         }
     }
 
@@ -308,20 +330,24 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         }
     }
 
-    private func removeFile() {
+    @discardableResult
+    private func removeFile() -> Bool {
         do {
             try FileManager.default.removeItem(at: fileURL)
+            return true
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            return
+            return true
         } catch {
             mostRecentFileError = error
+            return false
         }
     }
 
     // ponytail: 搜索诊断由用户临时启用，事件量按低千级上限处理；只有现场数据证明更大时才改分段文件。
-    private func writeEvents() {
+    private func writeEventsAtomically() {
         guard !storedEvents.isEmpty else {
-            removeFile()
+            fileContainsEvents = false
+            fileNeedsRewrite = !removeFile()
             return
         }
 
@@ -329,13 +355,40 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
         do {
             let encoder = JSONEncoder()
-            let lines = try storedEvents.map { event in
-                String(decoding: try encoder.encode(event), as: UTF8.self)
+            var data = Data()
+            for event in storedEvents {
+                data.append(try encoder.encode(event))
+                data.append(0x0A)
             }
-            let data = Data(lines.joined(separator: "\n").utf8)
             try data.write(to: fileURL, options: .atomic)
+            fileContainsEvents = true
+            fileNeedsRewrite = false
             mostRecentFileError = nil
         } catch {
+            fileNeedsRewrite = true
+            mostRecentFileError = error
+        }
+    }
+
+    private func appendEventLine(_ event: DiagnosticSearchEvent) {
+        do {
+            var data = try JSONEncoder().encode(event)
+            data.append(0x0A)
+
+            if fileContainsEvents {
+                let handle = try FileHandle(forWritingTo: fileURL)
+                defer { try? handle.close() }
+                _ = try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: fileURL)
+            }
+
+            fileContainsEvents = true
+            fileNeedsRewrite = false
+            mostRecentFileError = nil
+        } catch {
+            fileNeedsRewrite = true
             mostRecentFileError = error
         }
     }
@@ -348,21 +401,45 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         storedEvents.removeAll { $0.timestamp <= cutoff }
     }
 
+    private func updateTimestampBounds(adding timestamp: Date) {
+        earliestTimestamp = min(earliestTimestamp ?? timestamp, timestamp)
+        latestTimestamp = max(latestTimestamp ?? timestamp, timestamp)
+    }
+
+    private func recomputeTimestampBounds() {
+        earliestTimestamp = nil
+        latestTimestamp = nil
+        for event in storedEvents {
+            updateTimestampBounds(adding: event.timestamp)
+        }
+    }
+
     private func scheduleNextExpiry() {
+        guard let earliestTimestamp else {
+            cancelExpiryTimer()
+            return
+        }
+
+        let expiryTimestamp = earliestTimestamp.addingTimeInterval(Self.retentionInterval)
+        if expiryTimer != nil, scheduledExpiryTimestamp == expiryTimestamp {
+            return
+        }
+
         cancelExpiryTimer()
 
-        guard let earliestTimestamp = storedEvents.map(\.timestamp).min() else { return }
-
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        let delay = max(0, earliestTimestamp.addingTimeInterval(Self.retentionInterval).timeIntervalSince(now()))
+        let delay = max(0, expiryTimestamp.timeIntervalSince(now()))
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            self.cancelExpiryTimer()
             self.removeEvents(atOrBefore: self.now().addingTimeInterval(-Self.retentionInterval))
-            self.writeEvents()
+            self.recomputeTimestampBounds()
+            self.writeEventsAtomically()
             self.scheduleNextExpiry()
         }
         expiryTimer = timer
+        scheduledExpiryTimestamp = expiryTimestamp
         timer.resume()
     }
 
@@ -370,6 +447,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         expiryTimer?.setEventHandler {}
         expiryTimer?.cancel()
         expiryTimer = nil
+        scheduledExpiryTimestamp = nil
     }
 }
 

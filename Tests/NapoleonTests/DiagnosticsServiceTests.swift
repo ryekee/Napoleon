@@ -114,6 +114,52 @@ import Testing
         #expect(events.isEmpty)
     }
 
+    @Test func consecutiveAppendsKeepTheSameFileIdentity() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+        store.begin()
+        store.append(.fixture(timestamp: Date(timeIntervalSince1970: 10_000), query: "first"))
+        try await waitForSearchLineCount(1, at: store.fileURL)
+        let firstInode = try inode(at: store.fileURL)
+
+        store.append(.fixture(timestamp: Date(timeIntervalSince1970: 10_001), query: "second"))
+        try await waitForSearchLineCount(2, at: store.fileURL)
+        let secondInode = try inode(at: store.fileURL)
+
+        #expect(secondInode == firstInode)
+    }
+
+    @Test func oneThousandAppendsRemainCompleteAndDecodable() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { Date(timeIntervalSince1970: 20_000) }
+        )
+        store.begin()
+        for index in 0..<1_000 {
+            store.append(.fixture(
+                timestamp: Date(timeIntervalSince1970: 20_000 + Double(index)),
+                query: "query-\(index)"
+            ))
+        }
+
+        let events = try await store.events(since: .distantPast)
+        #expect(events.count == 1_000)
+        #expect(events.first?.query == "query-0")
+        #expect(events.last?.query == "query-999")
+
+        let contents = try String(contentsOf: store.fileURL, encoding: .utf8)
+        let decodedEvents = try contents.split(separator: "\n").map {
+            try JSONDecoder().decode(DiagnosticSearchEvent.self, from: Data($0.utf8))
+        }
+        #expect(decodedEvents == events)
+    }
+
     @MainActor @Test func generalReportExcludesSensitiveFilesAndTitles() async throws {
         let report = try await makeService(issue: .general).prepareReportDirectory()
         let state = try String(contentsOf: report.appending(path: "state.json"), encoding: .utf8)
@@ -389,4 +435,28 @@ private extension DiagnosticSearchEvent {
             ]
         )
     }
+}
+
+private enum SearchStoreTestError: Error {
+    case missingInode
+    case timedOutWaitingForLineCount(Int)
+}
+
+private func inode(at fileURL: URL) throws -> UInt64 {
+    let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+    guard let inode = attributes[.systemFileNumber] as? NSNumber else {
+        throw SearchStoreTestError.missingInode
+    }
+    return inode.uint64Value
+}
+
+private func waitForSearchLineCount(_ expectedCount: Int, at fileURL: URL) async throws {
+    for _ in 0..<200 {
+        if let contents = try? String(contentsOf: fileURL, encoding: .utf8),
+           contents.split(separator: "\n").count == expectedCount {
+            return
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+    throw SearchStoreTestError.timedOutWaitingForLineCount(expectedCount)
 }
