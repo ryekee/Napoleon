@@ -33,6 +33,7 @@ final class AppServices {
     /// 缩略图被提前淘汰、反复重抓，设置项形同虚设。跟 chord 一样：启动即用用户的值。
     let thumbnails: ThumbnailService
     let windowStore: WindowStore
+    let diagnostics: DiagnosticsService
     let overlay = OverlayPanel()
     let switcherController: SwitcherController
 
@@ -59,12 +60,28 @@ final class AppServices {
             thumbnails: thumbnails,
             includesOtherSpaces: { settings.scope.includeOtherSpaces }
         )
+        let windowStore = windowStore
+        let permissions = permissions
+        let diagnostics = DiagnosticsService(
+            snapshot: {
+                DiagnosticSnapshot.live(
+                    windows: windowStore.diagnosticState().windows,
+                    settings: settings,
+                    permissions: permissions
+                )
+            },
+            cachedThumbnail: { [thumbnails] id in thumbnails.cached(id) }
+        )
+        self.diagnostics = diagnostics
         switcherController = SwitcherController(
             windowStore: windowStore,
             thumbnails: thumbnails,
             settings: settings,
             overlay: overlay,
-            cancelHotkeySession: { [hotkey] in hotkey.cancelActiveSession() }
+            cancelHotkeySession: { [hotkey] in hotkey.cancelActiveSession() },
+            recordSearch: { [diagnostics] query, results in
+                diagnostics.recordSearch(query: query, results: results)
+            }
         )
     }
 

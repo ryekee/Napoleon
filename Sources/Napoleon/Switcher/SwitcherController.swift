@@ -49,6 +49,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     private let settings: SettingsStore
     private let overlay: OverlayPanel
     private let cancelHotkeySession: () -> Void
+    private let recordSearch: (String, [WindowInfo]) -> Void
 
     // MARK: - Session state（一次 trigger→commit/cancel 有效，见类型头注释）
 
@@ -100,13 +101,15 @@ final class SwitcherController: HotkeyManagerDelegate {
         thumbnails: ThumbnailService,
         settings: SettingsStore,
         overlay: OverlayPanel,
-        cancelHotkeySession: @escaping () -> Void
+        cancelHotkeySession: @escaping () -> Void,
+        recordSearch: @escaping (String, [WindowInfo]) -> Void = { _, _ in }
     ) {
         self.windowStore = windowStore
         self.thumbnails = thumbnails
         self.settings = settings
         self.overlay = overlay
         self.cancelHotkeySession = cancelHotkeySession
+        self.recordSearch = recordSearch
         overlay.onClickOutside = { [weak self] in
             self?.handleOutsideClick()
         }
@@ -158,6 +161,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// 内到来（经典快速切换），`finishSession` 会先 `cancel()` 掉它，面板永远不会弹出，直接
     /// 聚焦此刻的 `selection`（此时就是默认的「上一个窗口」）。
     private func handleTrigger(_ trigger: HotkeyTrigger) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         switch trigger {
         case .allWindows:
             mode = .allWindows
@@ -186,7 +190,8 @@ final class SwitcherController: HotkeyManagerDelegate {
         groupPrimaryWindowIDs = [:]
         selection = SelectionModel(count: items.count, initial: items.count > 1 ? 1 : 0)
 
-        Self.logger.info("trigger: \(filtered.count, privacy: .public) windows, mode=\(String(describing: trigger), privacy: .public)")
+        let elapsedMs = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+        Self.logger.info("trigger: \(filtered.count, privacy: .public) windows, mode=\(String(describing: trigger), privacy: .public), prepare_ms=\(elapsedMs, format: .fixed(precision: 3), privacy: .public)")
 
         pendingShow?.cancel()
         let workItem = DispatchWorkItem { [weak self] in self?.present() }
@@ -313,6 +318,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     private func recomputeSearch() {
         // 拼音是否参与匹配现读设置——开关下一次按键即生效（见 `WindowFilter.search`）。
         let results = WindowFilter.search(baseFiltered, query: query, includePinyin: settings.pinyinSearchEnabled)
+        recordSearch(query, results)
         ordered = results
         groupPrimaryWindowIDs = [:]
         selection.setCount(items.count)

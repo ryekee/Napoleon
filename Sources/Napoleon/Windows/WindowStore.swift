@@ -342,6 +342,9 @@ final class WindowStore {
         return (state, handles, currentSpaceIsFullscreen)
     }
 
+    /// 诊断报告只读当前内存热态；`WindowState` 是值类型（COW），不会触发窗口枚举或 AX 查询。
+    func diagnosticState() -> WindowState { state }
+
     /// 自愈：把「窗口服务器说在屏幕上、而热态里没有」的窗口补回来。
     ///
     /// **为什么必须有这一步**：热态的窗口集合是单向衰减的——增量 AX 通知负责加减窗口，而全量刷新
