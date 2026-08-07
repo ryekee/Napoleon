@@ -114,14 +114,15 @@ final class AppServices {
 
         // 设置窗口内容延迟到真正打开时才构造（`makeContent` 是闭包）——绝大多数启动用户根本
         // 不会打开设置，没必要在启动路径上付 SwiftUI 首次布局的成本。
-        let settingsWindow = SettingsWindowController { [settings, permissions, loginItem, updateChecker] navigation in
+        let settingsWindow = SettingsWindowController { [settings, permissions, loginItem, updateChecker, diagnostics] navigation in
             AnyView(
                 SettingsView(
                     navigation: navigation,
                     settings: settings,
                     permissions: permissions,
                     loginItem: loginItem,
-                    updateChecker: updateChecker
+                    updateChecker: updateChecker,
+                    diagnostics: diagnostics
                 )
             )
         }
