@@ -308,6 +308,8 @@ final class SearchDiagnosticStore: @unchecked Sendable {
                     self.writeEventsAtomically()
                 } else if self.fileNeedsRewrite {
                     self.writeEventsAtomically()
+                } else if !self.currentFileStateIsValid() {
+                    self.writeEventsAtomically()
                 }
                 self.scheduleNextExpiry()
 
@@ -440,6 +442,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
         try closeAppendFile(handle)
         closed = true
+        try validateCurrentFile(matching: after)
         return after
     }
 
@@ -493,6 +496,37 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             inode: UInt64(metadata.st_ino),
             length: metadata.st_size
         )
+    }
+
+    private func validateCurrentFile(matching expectedIdentity: FileIdentity) throws {
+        let descriptor = Darwin.open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        var closed = false
+        defer {
+            if !closed {
+                try? handle.close()
+            }
+        }
+
+        let currentIdentity = try identity(for: descriptor)
+        guard currentIdentity == expectedIdentity else { throw FileError.unexpectedFile }
+        try handle.close()
+        closed = true
+    }
+
+    private func currentFileStateIsValid() -> Bool {
+        guard let fileIdentity else { return storedEvents.isEmpty }
+        do {
+            try validateCurrentFile(matching: fileIdentity)
+            return true
+        } catch {
+            recordFileError(error)
+            self.fileIdentity = nil
+            fileNeedsRewrite = true
+            return false
+        }
     }
 
     private func currentPOSIXError() -> POSIXError {

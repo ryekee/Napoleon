@@ -234,6 +234,43 @@ import Testing
         #expect(try readSearchEvents(at: store.fileURL) == events)
     }
 
+    @Test func pathDeletedDuringAppendCloseIsRecoveredByTheSameAppend() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let fileURL = directory.appending(path: "search-diagnostics.jsonl")
+        let closeMutation = DeletePathOnSecondClose(fileURL: fileURL)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { .searchDiagnosticTestNow },
+            closeAppendFile: closeMutation.close
+        )
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+
+        try await waitForSearchQueries(["first", "second"], at: store.fileURL)
+    }
+
+    @Test func eventsRecoversAFileChangedAfterTheLastAppend() async throws {
+        let store = makeSearchStore()
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+        try Data("external replacement".utf8).write(to: store.fileURL, options: .atomic)
+
+        var observedError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch {
+            observedError = true
+        }
+        #expect(observedError)
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+        #expect(try await store.events(since: .distantPast).map(\.query) == ["first"])
+    }
+
     @Test func eventsWithoutCleanupKeepsTheSameFileIdentity() async throws {
         let store = makeSearchStore()
         store.begin()
@@ -574,6 +611,27 @@ private final class OneShotCloseFailure: @unchecked Sendable {
             throw SearchStoreTestError.injectedCloseFailure
         }
         try handle.close()
+    }
+}
+
+private final class DeletePathOnSecondClose: @unchecked Sendable {
+    private let fileURL: URL
+    private let lock = NSLock()
+    private var closeCount = 0
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
+    func close(_ handle: FileHandle) throws {
+        try handle.close()
+        let shouldDelete = lock.withLock {
+            closeCount += 1
+            return closeCount == 2
+        }
+        if shouldDelete {
+            try FileManager.default.removeItem(at: fileURL)
+        }
     }
 }
 
