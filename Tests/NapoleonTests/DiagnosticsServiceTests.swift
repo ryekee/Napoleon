@@ -1,3 +1,4 @@
+import CoreGraphics
 import Dispatch
 import Foundation
 import NapoleonCore
@@ -112,6 +113,211 @@ import Testing
         let events = try await store.events(since: .distantPast)
         #expect(events.isEmpty)
     }
+
+    @MainActor @Test func generalReportExcludesSensitiveFilesAndTitles() async throws {
+        let report = try await makeService(issue: .general).prepareReportDirectory()
+        let state = try String(contentsOf: report.appending(path: "state.json"), encoding: .utf8)
+        #expect(state.contains("Secret A") == false)
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "search.jsonl").path) == false)
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails").path) == false)
+    }
+
+    @MainActor @Test func searchReportAddsTitlesButNotThumbnails() async throws {
+        let report = try await makeService(issue: .search, query: "f").prepareReportDirectory()
+        #expect(try String(contentsOf: report.appending(path: "search.jsonl")).contains("Secret A"))
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails").path) == false)
+    }
+
+    @MainActor @Test func thumbnailReportUsesOnlyCacheHits() async throws {
+        let service = try await makeService(issue: .thumbnail, cachedIDs: [42])
+        let report = try await service.prepareReportDirectory()
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails/42.png").path))
+        #expect(try manifest(at: report).missingThumbnailWindowIDs == [43])
+    }
+
+    @MainActor @Test func generalModeDoesNotCreateSensitiveSearchStorage() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let searchStore = SearchDiagnosticStore(directory: directory)
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: DiagnosticCommands(
+                exportUnifiedLog: { url in try Data("fixed log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+            ),
+            searchStore: searchStore,
+            now: { Date() }
+        )
+        let privateWindow = WindowInfo(
+            id: 42,
+            pid: 10,
+            appName: "Finder",
+            appBundleID: "com.apple.finder",
+            title: "Private"
+        )
+        for _ in 0..<1_000 {
+            service.recordSearch(query: "secret", results: [privateWindow])
+        }
+        let events = try await searchStore.events(since: .distantPast)
+        #expect(events.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: searchStore.fileURL.path) == false)
+
+        service.selectIssue(.search)
+        service.recordSearch(query: "f", results: [privateWindow])
+        let searchEvents = try await searchStore.events(since: .distantPast)
+        #expect(searchEvents.map(\.query) == ["f"])
+        service.selectIssue(.general)
+        _ = try await searchStore.events(since: .distantPast)
+        #expect(FileManager.default.fileExists(atPath: searchStore.fileURL.path) == false)
+    }
+
+    private enum StubError: Error { case failed }
+
+    @MainActor @Test func unifiedLogFailureStillProducesStateAndManifestError() async throws {
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { _ in throw StubError.failed },
+            encodePNG: DiagnosticCommands.live.encodePNG,
+            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+        )
+        let service = try await makeService(issue: .general, commands: commands)
+        let report = try await service.prepareReportDirectory()
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "state.json").path))
+        #expect(try manifest(at: report).errors.contains("unified_log_export_failed"))
+    }
+
+    @MainActor @Test func onePNGFailureDoesNotDiscardOtherCacheHits() async throws {
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+            encodePNG: { image, url in
+                if url.lastPathComponent == "42.png" { throw StubError.failed }
+                try DiagnosticCommands.live.encodePNG(image, url)
+            },
+            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+        )
+        let service = try await makeService(issue: .thumbnail, cachedIDs: [42, 43], commands: commands)
+        let report = try await service.prepareReportDirectory()
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails/43.png").path))
+        #expect(try manifest(at: report).failedThumbnailWindowIDs == [42])
+    }
+
+    @Test func liveLogExportNeverRequestsPrivateExpansion() {
+        #expect(DiagnosticCommands.unifiedLogArguments == [
+            "show", "--last", "2h", "--style", "compact", "--info", "--debug",
+            "--predicate", "subsystem == \"com.napoleon.Napoleon\""
+        ])
+        #expect(DiagnosticCommands.unifiedLogArguments.contains("--privacy") == false)
+    }
+
+    @MainActor @Test func zipFailureKeepsUncompressedDirectory() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, _ in throw StubError.failed }
+            ),
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+        await #expect(throws: StubError.self) { try await service.prepareReport() }
+        let children = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(children.contains { $0.hasDirectoryPath })
+    }
+}
+
+private func onePixelImage() -> CGImage {
+    let context = CGContext(
+        data: nil,
+        width: 1,
+        height: 1,
+        bitsPerComponent: 8,
+        bytesPerRow: 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    return context.makeImage()!
+}
+
+private func snapshot() -> DiagnosticSnapshot {
+    .init(
+        appVersion: "0.2.0",
+        appBuild: "1",
+        macOSVersion: "26.0",
+        architecture: "arm64",
+        interfaceLanguage: "en",
+        accessibilityTrusted: true,
+        screenRecordingGranted: true,
+        allWindowsHotkey: "⌘Tab",
+        currentAppHotkey: "⌘`",
+        includeOtherSpaces: false,
+        includeMinimized: false,
+        includeHiddenApps: false,
+        pinyinSearchEnabled: true,
+        groupWindowsByApplication: false,
+        showDelayMs: 100,
+        apps: [
+            .init(
+                name: "Finder",
+                bundleID: "com.apple.finder",
+                pid: 10,
+                windowCount: 2,
+                windowIDs: [42, 43]
+            )
+        ]
+    )
+}
+
+private func manifest(at directory: URL) throws -> DiagnosticManifest {
+    let data = try Data(contentsOf: directory.appending(path: "manifest.json"))
+    return try JSONDecoder().decode(DiagnosticManifest.self, from: data)
+}
+
+@MainActor
+private func makeService(
+    issue: DiagnosticIssue,
+    query: String? = nil,
+    cachedIDs: Set<WindowID> = [],
+    commands override: DiagnosticCommands? = nil
+) async throws -> DiagnosticsService {
+    let directory = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    let commands = override ?? DiagnosticCommands(
+        exportUnifiedLog: { url in try Data("fixed log".utf8).write(to: url) },
+        encodePNG: DiagnosticCommands.live.encodePNG,
+        zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+    )
+    let service = DiagnosticsService(
+        directory: directory,
+        snapshot: snapshot,
+        cachedThumbnail: { cachedIDs.contains($0) ? onePixelImage() : nil },
+        commands: commands,
+        now: { Date(timeIntervalSince1970: 10_000) }
+    )
+    service.selectIssue(issue)
+    if let query {
+        service.recordSearch(
+            query: query,
+            results: [
+                WindowInfo(
+                    id: 42,
+                    pid: 10,
+                    appName: "Finder",
+                    appBundleID: "com.apple.finder",
+                    title: "Secret A"
+                )
+            ]
+        )
+    }
+    return service
 }
 
 private extension DiagnosticSearchEvent {
