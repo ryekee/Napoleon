@@ -135,7 +135,7 @@ these questions, and it does mean Napoleon is not App Store material.
 
 ## Status
 
-Early but usable daily. Version 0.2.0. Known rough edges:
+Early but usable daily. Version 0.3.0. Known rough edges:
 
 - Windows on another Space that Accessibility can't reach are focused at app level, so a
   multi-window app may not land on the exact window you picked.
