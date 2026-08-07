@@ -127,17 +127,17 @@ struct DiagnosticManifest: Codable, Equatable, Sendable {
         switch issue {
         case .general:
             contents = .init(
-                included: ["unified.log", "state.json", "manifest.json"],
+                included: ["napoleon.log", "state.json", "manifest.json"],
                 excluded: ["search.jsonl", "thumbnails"]
             )
         case .search:
             contents = .init(
-                included: ["unified.log", "state.json", "search.jsonl", "manifest.json"],
+                included: ["napoleon.log", "state.json", "search.jsonl", "manifest.json"],
                 excluded: ["thumbnails"]
             )
         case .thumbnail:
             contents = .init(
-                included: ["unified.log", "state.json", "thumbnails", "manifest.json"],
+                included: ["napoleon.log", "state.json", "thumbnails", "manifest.json"],
                 excluded: ["search.jsonl"]
             )
         }
@@ -310,13 +310,7 @@ private final class DiagnosticOutputPump: @unchecked Sendable {
         chunkBytes: Int,
         controller: DiagnosticProcessController
     ) throws {
-        let outputFileDescriptor = outputURL.withUnsafeFileSystemRepresentation { path in
-            guard let path else { return Int32(-1) }
-            return Darwin.open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
-        }
-        guard outputFileDescriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        let outputFileDescriptor = try Self.openNewRegularFile(at: outputURL)
 
         let inputFileDescriptor = reader.fileDescriptor
         let currentFlags = Darwin.fcntl(inputFileDescriptor, F_GETFL)
@@ -332,6 +326,47 @@ private final class DiagnosticOutputPump: @unchecked Sendable {
         byteLimit = max(0, maxBytes)
         self.chunkBytes = max(1, chunkBytes)
         self.controller = controller
+    }
+
+    private static func openNewRegularFile(at url: URL) throws -> Int32 {
+        let parentURL = url.deletingLastPathComponent()
+        let parentDescriptor = parentURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard parentDescriptor >= 0 else { throw currentPOSIXError() }
+        defer { Darwin.close(parentDescriptor) }
+
+        let descriptor = url.lastPathComponent.withCString { name in
+            Darwin.openat(
+                parentDescriptor,
+                name,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR
+            )
+        }
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else {
+            let error = currentPOSIXError()
+            Darwin.close(descriptor)
+            throw error
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG else {
+            Darwin.close(descriptor)
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        guard Darwin.fchmod(descriptor, DiagnosticFileSecurity.fileMode) == 0 else {
+            let error = currentPOSIXError()
+            Darwin.close(descriptor)
+            throw error
+        }
+        return descriptor
+    }
+
+    private static func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     func start() {
@@ -596,12 +631,65 @@ private final class DiagnosticProcessController: @unchecked Sendable {
     }
 }
 
+struct DiagnosticArtifactIdentity: Equatable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+    let fileType: mode_t
+
+    static func atPath(_ url: URL) throws -> Self? {
+        var metadata = stat()
+        guard Darwin.lstat(url.path, &metadata) == 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return .init(
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino),
+            fileType: metadata.st_mode & S_IFMT
+        )
+    }
+}
+
+private enum DiagnosticFileSecurity {
+    static let directoryMode: mode_t = 0o700
+    static let fileMode: mode_t = 0o600
+
+    static func createDirectory(at url: URL, withIntermediateDirectories: Bool) throws {
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: withIntermediateDirectories
+        )
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fchmod(descriptor, directoryMode) == 0 else { throw currentPOSIXError() }
+    }
+
+    static func secureRegularFile(at url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+        defer { Darwin.close(descriptor) }
+
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else { throw currentPOSIXError() }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        guard Darwin.fchmod(descriptor, fileMode) == 0 else { throw currentPOSIXError() }
+    }
+
+    private static func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
 final class DiagnosticRetentionScheduler: @unchecked Sendable {
     typealias Schedule = @Sendable (Date, @escaping @Sendable () -> Void) -> Void
 
     private struct Entry {
         let token: UUID
         let deadline: Date
+        let identity: DiagnosticArtifactIdentity
     }
 
     private static let logger = Logger(
@@ -612,6 +700,7 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
     static let live = DiagnosticRetentionScheduler(
         now: { Date() },
         retryDelays: [1, 5, 30],
+        identityAtPath: { try DiagnosticArtifactIdentity.atPath($0) },
         removeItem: { try FileManager.default.removeItem(at: $0) },
         schedule: { deadline, action in
             let delay = max(0, deadline.timeIntervalSinceNow)
@@ -627,6 +716,7 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
 
     private let now: @Sendable () -> Date
     private let retryDelays: [TimeInterval]
+    private let identityAtPath: @Sendable (URL) throws -> DiagnosticArtifactIdentity?
     private let removeItem: @Sendable (URL) throws -> Void
     private let schedule: Schedule
     private let logError: @Sendable (String) -> Void
@@ -636,26 +726,45 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
     init(
         now: @escaping @Sendable () -> Date,
         retryDelays: [TimeInterval],
+        identityAtPath: @escaping @Sendable (URL) throws -> DiagnosticArtifactIdentity? = {
+            try DiagnosticArtifactIdentity.atPath($0)
+        },
         removeItem: @escaping @Sendable (URL) throws -> Void,
         schedule: @escaping Schedule,
         logError: @escaping @Sendable (String) -> Void
     ) {
         self.now = now
         self.retryDelays = retryDelays
+        self.identityAtPath = identityAtPath
         self.removeItem = removeItem
         self.schedule = schedule
         self.logError = logError
     }
 
     func scheduleRemoval(_ url: URL, deadline: Date) {
-        guard Self.isManagedArtifact(url) else { return }
+        guard let expectedFileType = Self.expectedFileType(for: url) else { return }
+
+        let identity: DiagnosticArtifactIdentity
+        do {
+            guard let captured = try identityAtPath(url) else { return }
+            guard captured.fileType == expectedFileType else {
+                logError("diagnostic_retention_invalid_artifact")
+                return
+            }
+            identity = captured
+        } catch {
+            logError("diagnostic_retention_identity_read_failed")
+            return
+        }
 
         let token: UUID? = lock.withLock {
-            if let current = entries[url], current.deadline <= deadline {
+            if let current = entries[url],
+               current.identity == identity,
+               current.deadline <= deadline {
                 return nil
             }
             let token = UUID()
-            entries[url] = .init(token: token, deadline: deadline)
+            entries[url] = .init(token: token, deadline: deadline, identity: identity)
             return token
         }
         guard let token else { return }
@@ -669,8 +778,17 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
     }
 
     private func attemptRemoval(of url: URL, retryIndex: Int, token: UUID) {
-        guard isCurrent(url: url, token: token) else { return }
+        guard let entry = currentEntry(url: url, token: token) else { return }
         do {
+            guard let currentIdentity = try identityAtPath(url) else {
+                clear(url: url, token: token)
+                return
+            }
+            guard currentIdentity == entry.identity else {
+                clear(url: url, token: token)
+                logError("diagnostic_retention_identity_changed")
+                return
+            }
             try removeItem(url)
             clear(url: url, token: token)
         } catch {
@@ -691,8 +809,11 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
         }
     }
 
-    private func isCurrent(url: URL, token: UUID) -> Bool {
-        lock.withLock { entries[url]?.token == token }
+    private func currentEntry(url: URL, token: UUID) -> Entry? {
+        lock.withLock {
+            guard let entry = entries[url], entry.token == token else { return nil }
+            return entry
+        }
     }
 
     private func clear(url: URL, token: UUID) {
@@ -703,10 +824,11 @@ final class DiagnosticRetentionScheduler: @unchecked Sendable {
         }
     }
 
-    private static func isManagedArtifact(_ url: URL) -> Bool {
+    private static func expectedFileType(for url: URL) -> mode_t? {
         let isZIP = url.pathExtension == "zip"
         let stem = isZIP ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent
-        return UUID(uuidString: stem) != nil
+        guard UUID(uuidString: stem) != nil else { return nil }
+        return isZIP ? S_IFREG : S_IFDIR
     }
 
     private static func isFileNotFound(_ error: Error) -> Bool {
@@ -810,8 +932,21 @@ enum DiagnosticCommandError: Error {
     case couldNotEncodePNG
 }
 
-enum DiagnosticsServiceError: Error, Equatable, Sendable {
+enum DiagnosticsServiceError: Error, Equatable, LocalizedError, Sendable {
     case reportAlreadyInProgress
+    case zipTimedOut
+    case zipFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .reportAlreadyInProgress:
+            String(localized: "A diagnostic report is already being prepared.")
+        case .zipTimedOut:
+            String(localized: "Creating the diagnostic ZIP timed out. Try again; the uncompressed report is still available.")
+        case .zipFailed:
+            String(localized: "Could not create the diagnostic ZIP. Try again; the uncompressed report is still available.")
+        }
+    }
 }
 
 final class SearchDiagnosticStore: @unchecked Sendable {
@@ -991,7 +1126,10 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
     private func createDirectory() {
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try DiagnosticFileSecurity.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
         } catch {
             recordFileError(error)
         }
@@ -1212,6 +1350,9 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         } else {
             guard before.length == 0 else { throw FileError.unexpectedFile }
         }
+        guard Darwin.fchmod(descriptor, DiagnosticFileSecurity.fileMode) == 0 else {
+            throw currentPOSIXError()
+        }
 
         try handle.write(contentsOf: data)
         let after = try identity(for: descriptor)
@@ -1252,6 +1393,11 @@ final class SearchDiagnosticStore: @unchecked Sendable {
         )
         guard descriptor >= 0 else { throw currentPOSIXError() }
         temporaryFileCreated = true
+        guard Darwin.fchmod(descriptor, DiagnosticFileSecurity.fileMode) == 0 else {
+            let error = currentPOSIXError()
+            Darwin.close(descriptor)
+            throw error
+        }
 
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
         var closed = false
@@ -1390,7 +1536,12 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
 @MainActor
 final class DiagnosticsService: ObservableObject {
-    nonisolated static let defaultDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+    typealias ReportResourceValues = @Sendable (URL) throws -> URLResourceValues
+
+    nonisolated static let defaultDirectory = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+    )
         .first!
         .appending(path: "Napoleon/Diagnostics", directoryHint: .isDirectory)
 
@@ -1402,6 +1553,7 @@ final class DiagnosticsService: ObservableObject {
     private let commands: DiagnosticCommands
     private let searchStore: SearchDiagnosticStore
     private let now: @Sendable () -> Date
+    private let reportResourceValues: ReportResourceValues
     private let startupCleanup: Task<Void, Never>
     private var selectedIssue: DiagnosticIssue = .default
     private var lastWorkingDirectory: URL?
@@ -1413,7 +1565,15 @@ final class DiagnosticsService: ObservableObject {
         cachedThumbnail: @escaping @MainActor (WindowID) -> CGImage?,
         commands: DiagnosticCommands = .live,
         searchStore: SearchDiagnosticStore? = nil,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        reportResourceValues: @escaping ReportResourceValues = { url in
+            try url.resourceValues(forKeys: [
+                .creationDateKey,
+                .contentModificationDateKey,
+                .isDirectoryKey,
+                .isRegularFileKey
+            ])
+        }
     ) {
         self.directory = directory
         self.snapshot = snapshot
@@ -1421,6 +1581,7 @@ final class DiagnosticsService: ObservableObject {
         self.commands = commands
         self.searchStore = searchStore ?? SearchDiagnosticStore(directory: directory, now: now)
         self.now = now
+        self.reportResourceValues = reportResourceValues
 
         self.searchStore.discard()
         let startupDate = now()
@@ -1429,7 +1590,8 @@ final class DiagnosticsService: ObservableObject {
             try? Self.reconcileReports(
                 in: directory,
                 at: startupDate,
-                scheduleRemoval: scheduleRemoval
+                scheduleRemoval: scheduleRemoval,
+                resourceValues: reportResourceValues
             )
         }
     }
@@ -1476,12 +1638,31 @@ final class DiagnosticsService: ObservableObject {
         let report = try await prepareReportDirectoryUnlocked()
         try Task.checkCancellation()
         let zipURL = report.appendingPathExtension("zip")
-        commands.scheduleRemoval(zipURL, now().addingTimeInterval(Self.retentionInterval))
+        let zipDeadline = now().addingTimeInterval(Self.retentionInterval)
         do {
             try await commands.zip(report, zipURL)
+            let scheduleRemoval = commands.scheduleRemoval
+            try await Task.detached(priority: .utility) {
+                try DiagnosticFileSecurity.secureRegularFile(at: zipURL)
+                scheduleRemoval(zipURL, zipDeadline)
+            }.value
+        } catch is CancellationError {
+            let scheduleRemoval = commands.scheduleRemoval
+            let cleanupDate = now()
+            await Task.detached(priority: .utility) {
+                scheduleRemoval(zipURL, cleanupDate)
+            }.value
+            throw CancellationError()
         } catch {
-            try? FileManager.default.removeItem(at: zipURL)
-            throw error
+            let scheduleRemoval = commands.scheduleRemoval
+            let cleanupDate = now()
+            await Task.detached(priority: .utility) {
+                scheduleRemoval(zipURL, cleanupDate)
+            }.value
+            if error as? DiagnosticProcessRunnerError == .timedOut {
+                throw DiagnosticsServiceError.zipTimedOut
+            }
+            throw DiagnosticsServiceError.zipFailed
         }
         return zipURL
     }
@@ -1507,11 +1688,13 @@ final class DiagnosticsService: ObservableObject {
         let rootDirectory = directory
         let commands = commands
         let now = now
+        let reportResourceValues = reportResourceValues
         let writer = Task.detached(priority: .utility) {
             try Self.reconcileReports(
                 in: rootDirectory,
                 at: generatedAt,
-                scheduleRemoval: commands.scheduleRemoval
+                scheduleRemoval: commands.scheduleRemoval,
+                resourceValues: reportResourceValues
             )
             return try await Self.writeReport(
                 rootDirectory: rootDirectory,
@@ -1564,15 +1747,22 @@ final class DiagnosticsService: ObservableObject {
         now: @Sendable () -> Date
     ) async throws -> URL {
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+        try DiagnosticFileSecurity.createDirectory(
+            at: rootDirectory,
+            withIntermediateDirectories: true
+        )
         let report = rootDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
-        try fileManager.createDirectory(at: report, withIntermediateDirectories: false)
+        try DiagnosticFileSecurity.createDirectory(
+            at: report,
+            withIntermediateDirectories: false
+        )
         commands.scheduleRemoval(report, now().addingTimeInterval(retentionInterval))
 
         var errors: [String] = []
         try Task.checkCancellation()
+        let logURL = report.appending(path: "napoleon.log")
         do {
-            try await commands.exportUnifiedLog(report.appending(path: "unified.log"))
+            try await commands.exportUnifiedLog(logURL)
         } catch is CancellationError {
             throw CancellationError()
         } catch DiagnosticCommandError.unifiedLogTruncated {
@@ -1580,20 +1770,24 @@ final class DiagnosticsService: ObservableObject {
         } catch {
             errors.append("unified_log_export_failed")
         }
+        if fileManager.fileExists(atPath: logURL.path) {
+            try DiagnosticFileSecurity.secureRegularFile(at: logURL)
+        }
         try Task.checkCancellation()
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(snapshot).write(to: report.appending(path: "state.json"), options: .atomic)
+        let stateURL = report.appending(path: "state.json")
+        try encoder.encode(snapshot).write(to: stateURL, options: .atomic)
+        try DiagnosticFileSecurity.secureRegularFile(at: stateURL)
 
         if issue.includesSearch {
-            let lineEncoder = JSONEncoder()
-            lineEncoder.outputFormatting = [.sortedKeys]
-            let lines = try searchEvents.map { event in
-                String(decoding: try lineEncoder.encode(event), as: UTF8.self)
-            }
-            try Data(lines.joined(separator: "\n").utf8)
-                .write(to: report.appending(path: "search.jsonl"), options: .atomic)
+            try Task.checkCancellation()
+            let searchURL = report.appending(path: "search.jsonl")
+            let searchData = try await encodeSearchEvents(searchEvents)
+            try Task.checkCancellation()
+            try searchData.write(to: searchURL, options: .atomic)
+            try DiagnosticFileSecurity.secureRegularFile(at: searchURL)
         }
 
         let allWindowIDs = Set(snapshot.apps.flatMap(\.windowIDs))
@@ -1603,13 +1797,17 @@ final class DiagnosticsService: ObservableObject {
         var failedThumbnailWindowIDs: [WindowID] = []
         if issue.includesThumbnails {
             let thumbnailDirectory = report.appending(path: "thumbnails", directoryHint: .isDirectory)
-            try fileManager.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: false)
+            try DiagnosticFileSecurity.createDirectory(
+                at: thumbnailDirectory,
+                withIntermediateDirectories: false
+            )
             for windowID in thumbnails.keys.sorted() {
                 try Task.checkCancellation()
                 guard let image = thumbnails[windowID] else { continue }
                 let imageURL = thumbnailDirectory.appending(path: "\(windowID).png")
                 do {
                     try commands.encodePNG(image, imageURL)
+                    try DiagnosticFileSecurity.secureRegularFile(at: imageURL)
                 } catch {
                     try? fileManager.removeItem(at: imageURL)
                     failedThumbnailWindowIDs.append(windowID)
@@ -1627,14 +1825,36 @@ final class DiagnosticsService: ObservableObject {
             failedThumbnailWindowIDs: failedThumbnailWindowIDs,
             errors: errors
         )
-        try encoder.encode(manifest).write(to: report.appending(path: "manifest.json"), options: .atomic)
+        try Task.checkCancellation()
+        let manifestURL = report.appending(path: "manifest.json")
+        try encoder.encode(manifest).write(to: manifestURL, options: .atomic)
+        try DiagnosticFileSecurity.secureRegularFile(at: manifestURL)
         return report
+    }
+
+    nonisolated static func encodeSearchEvents(
+        _ searchEvents: [DiagnosticSearchEvent]
+    ) async throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var data = Data()
+        for (index, event) in searchEvents.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+            data.append(try encoder.encode(event))
+            data.append(0x0A)
+        }
+        try Task.checkCancellation()
+        return data
     }
 
     nonisolated private static func reconcileReports(
         in directory: URL,
         at referenceDate: Date,
-        scheduleRemoval: @Sendable (URL, Date) -> Void
+        scheduleRemoval: @Sendable (URL, Date) -> Void,
+        resourceValues: ReportResourceValues
     ) throws {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: directory.path) else { return }
@@ -1654,30 +1874,28 @@ final class DiagnosticsService: ObservableObject {
             let stem = isZIP ? child.deletingPathExtension().lastPathComponent : child.lastPathComponent
             guard UUID(uuidString: stem) != nil else { continue }
 
-            let values = try child.resourceValues(forKeys: [
-                .creationDateKey,
-                .contentModificationDateKey,
-                .isDirectoryKey,
-                .isRegularFileKey
-            ])
+            let values: URLResourceValues
+            do {
+                values = try resourceValues(child)
+            } catch {
+                if Self.isFileNotFound(error) { continue }
+                scheduleRemoval(child, referenceDate)
+                continue
+            }
             guard (isZIP && values.isRegularFile == true)
                     || (!isZIP && values.isDirectory == true) else { continue }
 
             let originDate = values.creationDate ?? values.contentModificationDate ?? .distantPast
             let deadline = originDate.addingTimeInterval(retentionInterval)
-            if deadline <= referenceDate {
-                do {
-                    try fileManager.removeItem(at: child)
-                } catch {
-                    let error = error as NSError
-                    if !((error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError)
-                        || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))) {
-                        scheduleRemoval(child, referenceDate)
-                    }
-                }
-            } else {
-                scheduleRemoval(child, deadline)
-            }
+            scheduleRemoval(child, deadline <= referenceDate ? referenceDate : deadline)
         }
+    }
+
+    nonisolated private static func isFileNotFound(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == NSCocoaErrorDomain
+                && (error.code == NSFileNoSuchFileError
+                    || error.code == NSFileReadNoSuchFileError))
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
     }
 }

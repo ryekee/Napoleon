@@ -595,12 +595,86 @@ import Testing
         #expect(appendedEvents == events)
     }
 
+    @Test func searchSourceDirectoryAndFileUsePrivatePermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let store = SearchDiagnosticStore(directory: directory, now: { .searchDiagnosticTestNow })
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "private"))
+        try await waitForSearchLineCount(1, at: store.fileURL)
+
+        #expect(try posixMode(at: directory) == 0o700)
+        #expect(try posixMode(at: store.fileURL) == 0o600)
+    }
+
     @MainActor @Test func generalReportExcludesSensitiveFilesAndTitles() async throws {
         let report = try await makeService(issue: .general).prepareReportDirectory()
         let state = try String(contentsOf: report.appending(path: "state.json"), encoding: .utf8)
         #expect(state.contains("Secret A") == false)
         #expect(FileManager.default.fileExists(atPath: report.appending(path: "search.jsonl").path) == false)
         #expect(FileManager.default.fileExists(atPath: report.appending(path: "thumbnails").path) == false)
+    }
+
+    @MainActor @Test func reportUsesTheConfirmedNapoleonLogArtifactName() async throws {
+        let report = try await makeService(issue: .general).prepareReportDirectory()
+
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "napoleon.log").path))
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "unified.log").path) == false)
+        #expect(try manifest(at: report).included == ["napoleon.log", "state.json", "manifest.json"])
+    }
+
+    @Test func productionDiagnosticsDirectoryLivesInApplicationSupport() {
+        let expected = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appending(path: "Napoleon/Diagnostics", directoryHint: .isDirectory)
+
+        #expect(DiagnosticsService.defaultDirectory.standardizedFileURL == expected.standardizedFileURL)
+    }
+
+    @MainActor @Test func generatedDirectoriesAndArtifactsUsePrivatePermissions() async throws {
+        for issue in [DiagnosticIssue.general, .search, .thumbnail] {
+            let root = FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            let service = DiagnosticsService(
+                directory: root,
+                snapshot: snapshot,
+                cachedThumbnail: { $0 == 42 ? onePixelImage() : nil },
+                commands: .init(
+                    exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                    encodePNG: DiagnosticCommands.live.encodePNG,
+                    zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                    scheduleRemoval: { _, _ in }
+                ),
+                now: { Date(timeIntervalSince1970: 10_000) }
+            )
+            service.selectIssue(issue)
+            if issue == .search {
+                service.recordSearch(query: "private", results: [])
+            }
+
+            let zip = try await service.prepareReport()
+            let report = zip.deletingPathExtension()
+            var files = [
+                report.appending(path: "napoleon.log"),
+                report.appending(path: "state.json"),
+                report.appending(path: "manifest.json"),
+                zip
+            ]
+            var directories = [root, report]
+            if issue == .search {
+                files.append(report.appending(path: "search.jsonl"))
+            } else if issue == .thumbnail {
+                directories.append(report.appending(path: "thumbnails", directoryHint: .isDirectory))
+                files.append(report.appending(path: "thumbnails/42.png"))
+            }
+
+            for directory in directories {
+                #expect(try posixMode(at: directory) == 0o700)
+            }
+            for file in files {
+                #expect(try posixMode(at: file) == 0o600)
+            }
+        }
     }
 
     @MainActor @Test func searchReportAddsTitlesButNotThumbnails() async throws {
@@ -741,6 +815,67 @@ import Testing
         #expect(try Data(contentsOf: outputURL) == Data(repeating: 120, count: 64))
     }
 
+    @Test func processRunnerRefusesExistingOutputWithoutStartingOrTruncating() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        try Data("protected".utf8).write(to: outputURL)
+        let started = BooleanProbe()
+        let runner = DiagnosticProcessRunner(
+            timeout: 1,
+            processDidStart: { started.setTrue() }
+        )
+
+        var observedError = false
+        do {
+            _ = try await runner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+                arguments: ["replacement"],
+                standardOutputURL: outputURL,
+                maxOutputBytes: 64
+            )
+        } catch {
+            observedError = true
+        }
+
+        #expect(observedError)
+        #expect(started.value == false)
+        #expect(try String(contentsOf: outputURL, encoding: .utf8) == "protected")
+    }
+
+    @Test func processRunnerRefusesSymbolicLinkOutputWithoutStartingOrFollowingIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appending(path: "protected.txt")
+        let outputURL = directory.appending(path: "napoleon.log")
+        try Data("protected".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: outputURL, withDestinationURL: target)
+        let started = BooleanProbe()
+        let runner = DiagnosticProcessRunner(
+            timeout: 1,
+            processDidStart: { started.setTrue() }
+        )
+
+        var observedError = false
+        do {
+            _ = try await runner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+                arguments: ["replacement"],
+                standardOutputURL: outputURL,
+                maxOutputBytes: 64
+            )
+        } catch {
+            observedError = true
+        }
+
+        #expect(observedError)
+        #expect(started.value == false)
+        #expect(try String(contentsOf: target, encoding: .utf8) == "protected")
+        #expect(isSymbolicLink(at: outputURL))
+    }
+
     @Test func processRunnerKeepsFastOutputPendingMemoryToOneFixedBlock() async throws {
         let outputURL = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .notDirectory)
@@ -828,6 +963,7 @@ import Testing
     @MainActor @Test func zipFailureKeepsUncompressedDirectory() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let removals = RemovalRecorder()
         let service = DiagnosticsService(
             directory: directory,
             snapshot: snapshot,
@@ -839,17 +975,93 @@ import Testing
                     try Data("partial zip".utf8).write(to: zipURL)
                     throw StubError.failed
                 },
-                scheduleRemoval: { _, _ in }
+                scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
             ),
             now: { Date(timeIntervalSince1970: 10_000) }
         )
-        await #expect(throws: StubError.self) { try await service.prepareReport() }
+        await #expect(throws: DiagnosticsServiceError.zipFailed) { try await service.prepareReport() }
         let children = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil
         )
         #expect(children.contains { $0.hasDirectoryPath })
-        #expect(children.contains { $0.pathExtension == "zip" } == false)
+        #expect(children.contains { $0.pathExtension == "zip" })
+        #expect(removals.values.last?.deadline == Date(timeIntervalSince1970: 10_000))
+    }
+
+    @MainActor @Test func publicPrepareMapsZipTimeoutToActionableStableError() async throws {
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+            encodePNG: DiagnosticCommands.live.encodePNG,
+            zip: { _, _ in throw DiagnosticProcessRunnerError.timedOut },
+            scheduleRemoval: { _, _ in }
+        )
+        let service = try await makeService(issue: .general, commands: commands)
+
+        do {
+            _ = try await service.prepareReport()
+            Issue.record("Expected ZIP timeout")
+        } catch {
+            #expect(error is DiagnosticsServiceError)
+            #expect(error.localizedDescription == "Creating the diagnostic ZIP timed out. Try again; the uncompressed report is still available.")
+        }
+    }
+
+    @MainActor @Test func publicPrepareMapsZipFailureToActionableStableError() async throws {
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+            encodePNG: DiagnosticCommands.live.encodePNG,
+            zip: { _, _ in throw StubError.failed },
+            scheduleRemoval: { _, _ in }
+        )
+        let service = try await makeService(issue: .general, commands: commands)
+
+        do {
+            _ = try await service.prepareReport()
+            Issue.record("Expected ZIP failure")
+        } catch {
+            #expect(error is DiagnosticsServiceError)
+            #expect(error.localizedDescription == "Could not create the diagnostic ZIP. Try again; the uncompressed report is still available.")
+        }
+    }
+
+    @MainActor @Test func publicPreparePreservesZipCancellationAndSchedulesPartialImmediately() async throws {
+        let removals = RemovalRecorder()
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+            encodePNG: DiagnosticCommands.live.encodePNG,
+            zip: { _, zipURL in
+                try Data("partial".utf8).write(to: zipURL)
+                throw CancellationError()
+            },
+            scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+        )
+        let service = try await makeService(issue: .general, commands: commands)
+
+        await #expect(throws: CancellationError.self) {
+            try await service.prepareReport()
+        }
+
+        #expect(removals.values.last?.deadline == Date(timeIntervalSince1970: 10_000))
+    }
+
+    @Test func largeSearchEncodingStopsPromptlyAfterCancellation() async throws {
+        let event = DiagnosticSearchEvent.fixture(
+            timestamp: .searchDiagnosticTestNow,
+            query: String(repeating: "private", count: 64)
+        )
+        let events = Array(repeating: event, count: 50_000)
+        let task = Task.detached {
+            try await DiagnosticsService.encodeSearchEvents(events)
+        }
+        await Task.yield()
+
+        let cancelledAt = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(Date().timeIntervalSince(cancelledAt) < 0.5)
     }
 
     @MainActor @Test func handoffAllowsSearchToBeExplicitlyEnabledAgain() async throws {
@@ -949,7 +1161,7 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: survivor.path))
     }
 
-    @MainActor @Test func startupDeletesExpiredArtifactEvenWhenItsContentsWereUpdated() async throws {
+    @MainActor @Test func startupSchedulesExpiredArtifactImmediatelyEvenWhenItsContentsWereUpdated() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let expired = directory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -960,6 +1172,34 @@ import Testing
             [.creationDate: createdAt, .modificationDate: restartedAt],
             ofItemAtPath: expired.path
         )
+        let removals = RemovalRecorder()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+            ),
+            now: { restartedAt }
+        )
+
+        _ = try await service.prepareReportDirectory()
+
+        #expect(removals.values.contains { value in
+            value.url.standardizedFileURL.path == expired.standardizedFileURL.path
+                && value.deadline == restartedAt
+        })
+    }
+
+    @MainActor @Test func artifactDisappearingAfterEnumerationDoesNotBlockNewReport() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let oldArtifact = directory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: oldArtifact, withIntermediateDirectories: true)
+        let race = DisappearingMetadataRace(victim: oldArtifact)
         let service = DiagnosticsService(
             directory: directory,
             snapshot: snapshot,
@@ -970,12 +1210,14 @@ import Testing
                 zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
                 scheduleRemoval: { _, _ in }
             ),
-            now: { restartedAt }
+            now: { Date(timeIntervalSince1970: 10_000) },
+            reportResourceValues: { url in try race.resourceValues(for: url) }
         )
 
-        _ = try await service.prepareReportDirectory()
+        let report = try await service.prepareReportDirectory()
 
-        #expect(FileManager.default.fileExists(atPath: expired.path) == false)
+        #expect(race.didRemoveVictim)
+        #expect(FileManager.default.fileExists(atPath: report.appending(path: "napoleon.log").path))
     }
 
     @Test func retentionSchedulerRetriesTransientFailureThenSucceeds() {
@@ -985,6 +1227,7 @@ import Testing
         let scheduler = DiagnosticRetentionScheduler(
             now: { now },
             retryDelays: [1, 5],
+            identityAtPath: { _ in .directoryFixture },
             removeItem: { url in try harness.remove(url) },
             schedule: { date, action in harness.schedule(date, action: action) },
             logError: { code in harness.log(code) }
@@ -1005,6 +1248,7 @@ import Testing
         let scheduler = DiagnosticRetentionScheduler(
             now: { now },
             retryDelays: [1, 5],
+            identityAtPath: { _ in .directoryFixture },
             removeItem: { url in try harness.remove(url) },
             schedule: { date, action in harness.schedule(date, action: action) },
             logError: { code in harness.log(code) }
@@ -1024,6 +1268,7 @@ import Testing
         let scheduler = DiagnosticRetentionScheduler(
             now: { now },
             retryDelays: [1, 5],
+            identityAtPath: { _ in .directoryFixture },
             removeItem: { url in try harness.remove(url) },
             schedule: { date, action in harness.schedule(date, action: action) },
             logError: { code in harness.log(code) }
@@ -1044,6 +1289,7 @@ import Testing
         var scheduler: DiagnosticRetentionScheduler? = DiagnosticRetentionScheduler(
             now: { now },
             retryDelays: [],
+            identityAtPath: { _ in .directoryFixture },
             removeItem: { url in harness.remove(url) },
             schedule: { date, action in harness.schedule(date, action: action) },
             logError: { _ in }
@@ -1058,6 +1304,66 @@ import Testing
         #expect(retainedScheduler != nil)
         harness.runScheduledAction()
         #expect(harness.removeAttempts == 1)
+    }
+
+    @Test func retentionSchedulerDoesNotDeleteSamePathReplacement() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let url = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = DeferredRetentionHarness()
+        let errors = StringRecorder()
+        let now = Date(timeIntervalSince1970: 10_000)
+        let scheduler = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [],
+            removeItem: { url in
+                harness.remove(url)
+                try FileManager.default.removeItem(at: url)
+            },
+            schedule: { date, action in harness.schedule(date, action: action) },
+            logError: { code in errors.record(code) }
+        )
+
+        scheduler.scheduleRemoval(url, deadline: now)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        try Data("replacement".utf8).write(to: url.appending(path: "marker"))
+        harness.runScheduledAction()
+
+        #expect(FileManager.default.fileExists(atPath: url.appending(path: "marker").path))
+        #expect(harness.removeAttempts == 0)
+        #expect(errors.values == ["diagnostic_retention_identity_changed"])
+    }
+
+    @Test func retentionRetryRevalidatesIdentityBeforeRemoving() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let url = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scheduled = DeferredRetentionHarness()
+        let removal = RetentionHarness(failuresBeforeSuccess: 1)
+        let errors = StringRecorder()
+        let now = Date(timeIntervalSince1970: 10_000)
+        let scheduler = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [1],
+            removeItem: { url in try removal.remove(url) },
+            schedule: { date, action in scheduled.schedule(date, action: action) },
+            logError: { code in errors.record(code) }
+        )
+
+        scheduler.scheduleRemoval(url, deadline: now)
+        scheduled.runScheduledAction()
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        scheduled.runScheduledAction()
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(removal.removeAttempts == 1)
+        #expect(errors.values == ["diagnostic_retention_identity_changed"])
     }
 
     @MainActor @Test func failedZipAndItsWorkingDirectoryBothGetRemovalDeadlines() async throws {
@@ -1080,16 +1386,41 @@ import Testing
             now: { Date(timeIntervalSince1970: 10_000) }
         )
 
-        await #expect(throws: StubError.self) { try await service.prepareReport() }
+        await #expect(throws: DiagnosticsServiceError.zipFailed) { try await service.prepareReport() }
 
         let values = removals.values
         #expect(values.count == 2)
         #expect(values.map(\.deadline) == [
             Date(timeIntervalSince1970: 17_200),
-            Date(timeIntervalSince1970: 17_200)
+            Date(timeIntervalSince1970: 10_000)
         ])
         let report = try #require(values.first?.url)
         #expect(values.map(\.url) == [report, report.appendingPathExtension("zip")])
+    }
+
+    @MainActor @Test func successfulZipIsScheduledOnlyAfterItExistsWithPrivatePermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let schedules = SecureScheduleRecorder()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { url, deadline in schedules.record(url: url, deadline: deadline) }
+            ),
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+
+        let zip = try await service.prepareReport()
+
+        let zipSchedule = try #require(schedules.values.first { $0.url == zip })
+        #expect(zipSchedule.existed)
+        #expect(zipSchedule.mode == 0o600)
+        #expect(zipSchedule.deadline == Date(timeIntervalSince1970: 17_200))
     }
 
     @MainActor @Test func reportPreparationRejectsConcurrentCallsAndRecoversAfterCompletion() async throws {
@@ -1180,6 +1511,86 @@ private final class RemovalRecorder: @unchecked Sendable {
     }
 }
 
+private final class SecureScheduleRecorder: @unchecked Sendable {
+    struct Value: Sendable {
+        let url: URL
+        let deadline: Date
+        let existed: Bool
+        let mode: mode_t?
+    }
+
+    private let lock = NSLock()
+    private var storage: [Value] = []
+
+    var values: [Value] { lock.withLock { storage } }
+
+    func record(url: URL, deadline: Date) {
+        let value = Value(
+            url: url,
+            deadline: deadline,
+            existed: FileManager.default.fileExists(atPath: url.path),
+            mode: try? posixMode(at: url)
+        )
+        lock.withLock { storage.append(value) }
+    }
+}
+
+private final class BooleanProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    var value: Bool { lock.withLock { storage } }
+
+    func setTrue() {
+        lock.withLock { storage = true }
+    }
+}
+
+private final class StringRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] { lock.withLock { storage } }
+
+    func record(_ value: String) {
+        lock.withLock { storage.append(value) }
+    }
+}
+
+private final class DisappearingMetadataRace: @unchecked Sendable {
+    private let victim: URL
+    private let lock = NSLock()
+    private var victimReadCount = 0
+    private var removedVictim = false
+
+    init(victim: URL) {
+        self.victim = victim.standardizedFileURL
+    }
+
+    var didRemoveVictim: Bool { lock.withLock { removedVictim } }
+
+    func resourceValues(for url: URL) throws -> URLResourceValues {
+        let shouldRemove = lock.withLock {
+            guard url.standardizedFileURL == victim else { return false }
+            victimReadCount += 1
+            guard victimReadCount == 2 else { return false }
+            removedVictim = true
+            return true
+        }
+        if shouldRemove {
+            try FileManager.default.removeItem(at: url)
+        }
+        var uncachedURL = url
+        uncachedURL.removeAllCachedResourceValues()
+        return try uncachedURL.resourceValues(forKeys: [
+            .creationDateKey,
+            .contentModificationDateKey,
+            .isDirectoryKey,
+            .isRegularFileKey
+        ])
+    }
+}
+
 private final class RetentionHarness: @unchecked Sendable {
     enum Failure: Sendable {
         case transient
@@ -1255,6 +1666,10 @@ private final class DeferredRetentionHarness: @unchecked Sendable {
 
 private enum RetentionTestError: Error {
     case transient
+}
+
+private extension DiagnosticArtifactIdentity {
+    static let directoryFixture = Self(device: 1, inode: 2, fileType: S_IFDIR)
 }
 
 private actor FirstCallGate {
@@ -1394,6 +1809,14 @@ private func snapshot() -> DiagnosticSnapshot {
 private func manifest(at directory: URL) throws -> DiagnosticManifest {
     let data = try Data(contentsOf: directory.appending(path: "manifest.json"))
     return try JSONDecoder().decode(DiagnosticManifest.self, from: data)
+}
+
+private func posixMode(at url: URL) throws -> mode_t {
+    var metadata = stat()
+    guard Darwin.lstat(url.path, &metadata) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return metadata.st_mode & 0o777
 }
 
 @MainActor

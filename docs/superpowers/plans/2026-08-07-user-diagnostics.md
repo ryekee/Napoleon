@@ -527,7 +527,7 @@ static func live(
 }
 ```
 
-`DiagnosticManifest` 包含 issue、生成时间、`included`, `excluded`, `missingThumbnailWindowIDs`, `failedThumbnailWindowIDs`, `errors`。三个 issue 的 included/excluded 由一个纯函数生成并由 Step 1 测试锁定。
+`DiagnosticManifest` 包含 issue、生成时间、`included`, `excluded`, `missingThumbnailWindowIDs`, `failedThumbnailWindowIDs`, `errors`。Unified Logging 产物名以确认设计为 source of truth，统一为 `napoleon.log`；三个 issue 的 included/excluded 由一个纯函数生成并由 Step 1 测试锁定。
 
 - [ ] **Step 5: 实现本地报告和系统命令边界**
 
@@ -560,7 +560,7 @@ final class DiagnosticsService: ObservableObject {
 1. 主线程取得 snapshot；
 2. Thumbnail issue 才对 snapshot 中 window ID 调 `cachedThumbnail`；
 3. 后台创建 UUID 工作目录；
-4. 调 `/usr/bin/log` 导出 compact 日志，失败写 manifest error 后继续；
+4. 调 `/usr/bin/log` 导出 compact 日志到 `napoleon.log`，失败写 manifest error 后继续；
 5. 写 `state.json`，Search issue 写 `search.jsonl`；
 6. Thumbnail issue 使用 `CGImageDestination` + `UTType.png` 写缓存图；
 7. 最后写 manifest；
