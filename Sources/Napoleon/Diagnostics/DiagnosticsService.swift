@@ -42,14 +42,10 @@ final class SearchDiagnosticStore {
         self.directory = directory
         self.now = now
         fileURL = directory.appending(path: "search-diagnostics.jsonl", directoryHint: .notDirectory)
-        queue.async { [weak self] in
-            self?.removeFile()
-        }
     }
 
     func begin() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        queue.async {
             self.isActive = true
             self.storedEvents.removeAll()
             self.cancelExpiryTimer()
@@ -60,8 +56,8 @@ final class SearchDiagnosticStore {
     }
 
     func append(_ event: DiagnosticSearchEvent) {
-        queue.async { [weak self] in
-            guard let self, self.isActive else { return }
+        queue.async {
+            guard self.isActive else { return }
 
             self.storedEvents.append(event)
             if let newestTimestamp = self.storedEvents.map(\.timestamp).max() {
@@ -103,8 +99,7 @@ final class SearchDiagnosticStore {
     }
 
     func discard() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        queue.async {
             self.isActive = false
             self.storedEvents.removeAll()
             self.cancelExpiryTimer()
@@ -123,10 +118,10 @@ final class SearchDiagnosticStore {
     }
 
     private func removeFile() {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
-
         do {
             try FileManager.default.removeItem(at: fileURL)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            return
         } catch {
             mostRecentFileError = error
         }
@@ -158,6 +153,10 @@ final class SearchDiagnosticStore {
         storedEvents.removeAll { $0.timestamp < cutoff }
     }
 
+    private func removeEvents(atOrBefore cutoff: Date) {
+        storedEvents.removeAll { $0.timestamp <= cutoff }
+    }
+
     private func scheduleNextExpiry() {
         cancelExpiryTimer()
 
@@ -168,7 +167,7 @@ final class SearchDiagnosticStore {
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            self.removeEvents(olderThan: self.now().addingTimeInterval(-Self.retentionInterval))
+            self.removeEvents(atOrBefore: self.now().addingTimeInterval(-Self.retentionInterval))
             self.writeEvents()
             self.scheduleNextExpiry()
         }
