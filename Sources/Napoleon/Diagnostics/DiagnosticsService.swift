@@ -144,35 +144,379 @@ struct DiagnosticManifest: Codable, Equatable, Sendable {
     }
 }
 
+struct DiagnosticProcessResult: Equatable, Sendable {
+    let terminationStatus: Int32
+    let outputTruncated: Bool
+}
+
+enum DiagnosticProcessRunnerError: Error, Equatable, Sendable {
+    case timedOut
+}
+
+struct DiagnosticProcessRunner: Sendable {
+    private enum WaitEvent: Sendable {
+        case terminated(Int32)
+        case timedOut
+    }
+
+    let timeout: TimeInterval
+    let terminationGracePeriod: TimeInterval
+    private let processDidStart: @Sendable () -> Void
+
+    init(
+        timeout: TimeInterval,
+        terminationGracePeriod: TimeInterval = 0.25,
+        processDidStart: @escaping @Sendable () -> Void = {}
+    ) {
+        self.timeout = timeout
+        self.terminationGracePeriod = terminationGracePeriod
+        self.processDidStart = processDidStart
+    }
+
+    func run(
+        executableURL: URL,
+        arguments: [String],
+        standardOutputURL: URL? = nil,
+        maxOutputBytes: Int? = nil
+    ) async throws -> DiagnosticProcessResult {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardError = FileHandle.nullDevice
+
+        let outputPipe = standardOutputURL.map { _ in Pipe() }
+        process.standardOutput = outputPipe?.fileHandleForWriting ?? FileHandle.nullDevice
+        let controller = DiagnosticProcessController(
+            process: process,
+            terminationGracePeriod: terminationGracePeriod
+        )
+        let outputPump: DiagnosticOutputPump?
+        if let outputPipe, let standardOutputURL {
+            outputPump = try DiagnosticOutputPump(
+                reader: outputPipe.fileHandleForReading,
+                outputURL: standardOutputURL,
+                maxBytes: maxOutputBytes ?? .max,
+                controller: controller
+            )
+            outputPump?.start()
+        } else {
+            outputPump = nil
+        }
+        process.terminationHandler = { [weak controller] process in
+            controller?.processDidTerminate(status: process.terminationStatus)
+        }
+
+        return try await withTaskCancellationHandler {
+            defer {
+                try? outputPipe?.fileHandleForWriting.close()
+                outputPump?.finishImmediately()
+            }
+            try Task.checkCancellation()
+            do {
+                try controller.launch()
+            } catch {
+                try? outputPipe?.fileHandleForWriting.close()
+                outputPump?.finishImmediately()
+                throw error
+            }
+            try? outputPipe?.fileHandleForWriting.close()
+            processDidStart()
+
+            let waitResult: (status: Int32, timedOut: Bool)
+            do {
+                waitResult = try await waitForTermination(of: controller)
+            } catch {
+                _ = await controller.waitForTermination()
+                outputPump?.finishAfterDrainPeriod(terminationGracePeriod)
+                _ = try? await outputPump?.result()
+                throw error
+            }
+
+            outputPump?.finishAfterDrainPeriod(terminationGracePeriod)
+            if waitResult.timedOut {
+                _ = try? await outputPump?.result()
+                throw DiagnosticProcessRunnerError.timedOut
+            }
+            let outputTruncated = try await outputPump?.result() ?? false
+            try Task.checkCancellation()
+            return .init(
+                terminationStatus: waitResult.status,
+                outputTruncated: outputTruncated
+            )
+        } onCancel: {
+            controller.requestStop()
+        }
+    }
+
+    private func waitForTermination(
+        of controller: DiagnosticProcessController
+    ) async throws -> (status: Int32, timedOut: Bool) {
+        try await withThrowingTaskGroup(of: WaitEvent.self) { group in
+            group.addTask {
+                .terminated(await controller.waitForTermination())
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                return .timedOut
+            }
+
+            var didTimeOut = false
+            while let event = try await group.next() {
+                switch event {
+                case let .terminated(status):
+                    group.cancelAll()
+                    return (status, didTimeOut)
+                case .timedOut:
+                    didTimeOut = true
+                    controller.requestStop()
+                }
+            }
+            throw CancellationError()
+        }
+    }
+}
+
+private final class DiagnosticOutputPump: @unchecked Sendable {
+    private let reader: FileHandle
+    private let output: FileHandle
+    private let byteLimit: Int
+    private let controller: DiagnosticProcessController
+    private let queue = DispatchQueue(label: "com.ryekee.napoleon.diagnostic-output", qos: .utility)
+    private var writtenByteCount = 0
+    private var isTruncated = false
+    private var completion: Result<Bool, Error>?
+    private var continuation: CheckedContinuation<Bool, Error>?
+
+    init(
+        reader: FileHandle,
+        outputURL: URL,
+        maxBytes: Int,
+        controller: DiagnosticProcessController
+    ) throws {
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        self.reader = reader
+        output = try FileHandle(forWritingTo: outputURL)
+        byteLimit = max(0, maxBytes)
+        self.controller = controller
+    }
+
+    func start() {
+        reader.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            self?.queue.async { [weak self] in
+                self?.consume(data)
+            }
+        }
+    }
+
+    func finishAfterDrainPeriod(_ drainPeriod: TimeInterval) {
+        queue.asyncAfter(deadline: .now() + max(0, drainPeriod)) { [self] in
+            finish(.success(isTruncated))
+        }
+    }
+
+    func finishImmediately() {
+        queue.async { [self] in
+            finish(.success(isTruncated))
+        }
+    }
+
+    func result() async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { [self] in
+                if let completion {
+                    resume(continuation, with: completion)
+                } else {
+                    self.continuation = continuation
+                }
+            }
+        }
+    }
+
+    private func consume(_ data: Data) {
+        guard completion == nil else { return }
+        guard !data.isEmpty else {
+            finish(.success(isTruncated))
+            return
+        }
+        guard !isTruncated else { return }
+
+        let writableByteCount = min(data.count, byteLimit - writtenByteCount)
+        do {
+            if writableByteCount > 0 {
+                try output.write(contentsOf: data.prefix(writableByteCount))
+                writtenByteCount += writableByteCount
+            }
+        } catch {
+            controller.requestStop()
+            finish(.failure(error))
+            return
+        }
+        if writableByteCount < data.count {
+            isTruncated = true
+            controller.requestStop()
+        }
+    }
+
+    private func finish(_ result: Result<Bool, Error>) {
+        guard completion == nil else { return }
+        completion = result
+        reader.readabilityHandler = nil
+        try? reader.close()
+        try? output.close()
+        guard let continuation else { return }
+        self.continuation = nil
+        resume(continuation, with: result)
+    }
+
+    private func resume(
+        _ continuation: CheckedContinuation<Bool, Error>,
+        with result: Result<Bool, Error>
+    ) {
+        switch result {
+        case let .success(value):
+            continuation.resume(returning: value)
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+private final class DiagnosticProcessController: @unchecked Sendable {
+    private let process: Process
+    private let terminationGracePeriod: TimeInterval
+    private let lock = NSLock()
+    private var launched = false
+    private var stopRequested = false
+    private var terminationSignalSent = false
+    private var terminationStatus: Int32?
+    private var waiters: [CheckedContinuation<Int32, Never>] = []
+
+    init(process: Process, terminationGracePeriod: TimeInterval) {
+        self.process = process
+        self.terminationGracePeriod = terminationGracePeriod
+    }
+
+    func launch() throws {
+        try process.run()
+
+        lock.lock()
+        launched = true
+        let shouldStop = stopRequested && terminationStatus == nil && !terminationSignalSent
+        if shouldStop {
+            terminationSignalSent = true
+        }
+        lock.unlock()
+
+        if shouldStop {
+            terminateAndScheduleKill()
+        }
+    }
+
+    func requestStop() {
+        lock.lock()
+        stopRequested = true
+        let shouldStop = launched && terminationStatus == nil && !terminationSignalSent
+        if shouldStop {
+            terminationSignalSent = true
+        }
+        lock.unlock()
+
+        if shouldStop {
+            terminateAndScheduleKill()
+        }
+    }
+
+    func processDidTerminate(status: Int32) {
+        lock.lock()
+        guard terminationStatus == nil else {
+            lock.unlock()
+            return
+        }
+        terminationStatus = status
+        let waiters = waiters
+        self.waiters.removeAll()
+        lock.unlock()
+        waiters.forEach { $0.resume(returning: status) }
+    }
+
+    func waitForTermination() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let terminationStatus {
+                lock.unlock()
+                continuation.resume(returning: terminationStatus)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    private func terminateAndScheduleKill() {
+        process.terminate()
+        let delay = max(0, terminationGracePeriod)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [self] in
+            lock.lock()
+            let processIdentifier = terminationStatus == nil ? process.processIdentifier : 0
+            lock.unlock()
+            if processIdentifier > 0 {
+                Darwin.kill(processIdentifier, SIGKILL)
+            }
+        }
+    }
+}
+
 struct DiagnosticCommands: Sendable {
     let exportUnifiedLog: @Sendable (URL) async throws -> Void
     let encodePNG: @Sendable (CGImage, URL) throws -> Void
     let zip: @Sendable (URL, URL) async throws -> Void
+    let scheduleRemoval: @Sendable (URL, Date) -> Void
+
+    init(
+        exportUnifiedLog: @escaping @Sendable (URL) async throws -> Void,
+        encodePNG: @escaping @Sendable (CGImage, URL) throws -> Void,
+        zip: @escaping @Sendable (URL, URL) async throws -> Void,
+        scheduleRemoval: @escaping @Sendable (URL, Date) -> Void
+    ) {
+        self.exportUnifiedLog = exportUnifiedLog
+        self.encodePNG = encodePNG
+        self.zip = zip
+        self.scheduleRemoval = scheduleRemoval
+    }
 
     static let unifiedLogArguments = [
         "show", "--last", "2h", "--style", "compact", "--info", "--debug",
         "--predicate", "subsystem == \"com.napoleon.Napoleon\""
     ]
+    static let unifiedLogMaxBytes = 20 * 1_024 * 1_024
+
+    private static let liveLogRunner = DiagnosticProcessRunner(timeout: 30)
+    private static let liveZipRunner = DiagnosticProcessRunner(timeout: 120)
 
     static let live = Self(
         exportUnifiedLog: { url in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
-            process.arguments = unifiedLogArguments
-            process.standardError = FileHandle.nullDevice
             do {
-                try Data().write(to: url, options: .atomic)
-                let output = try FileHandle(forWritingTo: url)
-                defer { try? output.close() }
-                process.standardOutput = output
-                try process.run()
-                process.waitUntilExit()
-                guard process.terminationStatus == 0 else {
+                let result = try await liveLogRunner.run(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/log"),
+                    arguments: unifiedLogArguments,
+                    standardOutputURL: url,
+                    maxOutputBytes: unifiedLogMaxBytes
+                )
+                if result.outputTruncated {
+                    throw DiagnosticCommandError.unifiedLogTruncated
+                }
+                guard result.terminationStatus == 0 else {
                     throw DiagnosticCommandError.processFailed(
                         executable: "/usr/bin/log",
-                        status: process.terminationStatus
+                        status: result.terminationStatus
                     )
                 }
+            } catch DiagnosticCommandError.unifiedLogTruncated {
+                throw DiagnosticCommandError.unifiedLogTruncated
             } catch {
                 try? FileManager.default.removeItem(at: url)
                 throw error
@@ -193,30 +537,44 @@ struct DiagnosticCommands: Sendable {
             }
         },
         zip: { directory, zipURL in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-            process.arguments = [
-                "-c", "-k", "--sequesterRsrc", "--keepParent",
-                directory.path, zipURL.path
-            ]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
+            let result = try await liveZipRunner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/ditto"),
+                arguments: [
+                    "-c", "-k", "--sequesterRsrc", "--keepParent",
+                    directory.path, zipURL.path
+                ]
+            )
+            guard result.terminationStatus == 0 else {
                 throw DiagnosticCommandError.processFailed(
                     executable: "/usr/bin/ditto",
-                    status: process.terminationStatus
+                    status: result.terminationStatus
                 )
             }
-        }
+        },
+        scheduleRemoval: liveRemovalScheduler
     )
+
+    private static let liveRemovalScheduler: @Sendable (URL, Date) -> Void = { url, deadline in
+        let isZIP = url.pathExtension == "zip"
+        let stem = isZIP ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent
+        guard UUID(uuidString: stem) != nil else { return }
+
+        let delay = max(0, deadline.timeIntervalSinceNow)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 }
 
-private enum DiagnosticCommandError: Error {
+enum DiagnosticCommandError: Error {
     case processFailed(executable: String, status: Int32)
+    case unifiedLogTruncated
     case couldNotCreatePNGDestination
     case couldNotEncodePNG
+}
+
+enum DiagnosticsServiceError: Error, Equatable, Sendable {
+    case reportAlreadyInProgress
 }
 
 final class SearchDiagnosticStore: @unchecked Sendable {
@@ -674,7 +1032,7 @@ final class DiagnosticsService: ObservableObject {
         .first!
         .appending(path: "Napoleon/Diagnostics", directoryHint: .isDirectory)
 
-    private static let retentionInterval: TimeInterval = 7_200
+    nonisolated private static let retentionInterval: TimeInterval = 7_200
 
     private let directory: URL
     private let snapshot: @MainActor () -> DiagnosticSnapshot
@@ -685,6 +1043,7 @@ final class DiagnosticsService: ObservableObject {
     private let startupCleanup: Task<Void, Never>
     private var selectedIssue: DiagnosticIssue = .default
     private var lastWorkingDirectory: URL?
+    private var isPreparingReport = false
 
     init(
         directory: URL = DiagnosticsService.defaultDirectory,
@@ -738,6 +1097,35 @@ final class DiagnosticsService: ObservableObject {
     }
 
     func prepareReportDirectory() async throws -> URL {
+        try beginReportPreparation()
+        defer { isPreparingReport = false }
+        return try await prepareReportDirectoryUnlocked()
+    }
+
+    func prepareReport() async throws -> URL {
+        try beginReportPreparation()
+        defer { isPreparingReport = false }
+
+        let report = try await prepareReportDirectoryUnlocked()
+        let zipURL = report.appendingPathExtension("zip")
+        commands.scheduleRemoval(zipURL, now().addingTimeInterval(Self.retentionInterval))
+        do {
+            try await commands.zip(report, zipURL)
+        } catch {
+            try? FileManager.default.removeItem(at: zipURL)
+            throw error
+        }
+        return zipURL
+    }
+
+    private func beginReportPreparation() throws {
+        guard !isPreparingReport else {
+            throw DiagnosticsServiceError.reportAlreadyInProgress
+        }
+        isPreparingReport = true
+    }
+
+    private func prepareReportDirectoryUnlocked() async throws -> URL {
         let issue = selectedIssue
         let generatedAt = now()
         let snapshot = snapshot()
@@ -750,6 +1138,7 @@ final class DiagnosticsService: ObservableObject {
         let cutoff = generatedAt.addingTimeInterval(-Self.retentionInterval)
         let rootDirectory = directory
         let commands = commands
+        let now = now
         let report = try await Task.detached(priority: .utility) {
             try Self.removeExpiredReports(in: rootDirectory, olderThan: cutoff)
             return try await Self.writeReport(
@@ -759,23 +1148,12 @@ final class DiagnosticsService: ObservableObject {
                 snapshot: snapshot,
                 searchEvents: searchEvents,
                 thumbnails: thumbnails,
-                commands: commands
+                commands: commands,
+                now: now
             )
         }.value
         lastWorkingDirectory = report
         return report
-    }
-
-    func prepareReport() async throws -> URL {
-        let report = try await prepareReportDirectory()
-        let zipURL = report.appendingPathExtension("zip")
-        do {
-            try await commands.zip(report, zipURL)
-        } catch {
-            try? FileManager.default.removeItem(at: zipURL)
-            throw error
-        }
-        return zipURL
     }
 
     func reportWasHandedOff() {
@@ -805,16 +1183,20 @@ final class DiagnosticsService: ObservableObject {
         snapshot: DiagnosticSnapshot,
         searchEvents: [DiagnosticSearchEvent],
         thumbnails: [WindowID: CGImage],
-        commands: DiagnosticCommands
+        commands: DiagnosticCommands,
+        now: @Sendable () -> Date
     ) async throws -> URL {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         let report = rootDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try fileManager.createDirectory(at: report, withIntermediateDirectories: false)
+        commands.scheduleRemoval(report, now().addingTimeInterval(retentionInterval))
 
         var errors: [String] = []
         do {
             try await commands.exportUnifiedLog(report.appending(path: "unified.log"))
+        } catch DiagnosticCommandError.unifiedLogTruncated {
+            errors.append("unified_log_truncated")
         } catch {
             errors.append("unified_log_export_failed")
         }

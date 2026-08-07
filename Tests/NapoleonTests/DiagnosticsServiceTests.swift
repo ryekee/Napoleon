@@ -464,7 +464,8 @@ import Testing
             commands: DiagnosticCommands(
                 exportUnifiedLog: { url in try Data("fixed log".utf8).write(to: url) },
                 encodePNG: DiagnosticCommands.live.encodePNG,
-                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { _, _ in }
             ),
             searchStore: searchStore,
             now: { Date() }
@@ -498,7 +499,8 @@ import Testing
         let commands = DiagnosticCommands(
             exportUnifiedLog: { _ in throw StubError.failed },
             encodePNG: DiagnosticCommands.live.encodePNG,
-            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+            scheduleRemoval: { _, _ in }
         )
         let service = try await makeService(issue: .general, commands: commands)
         let report = try await service.prepareReportDirectory()
@@ -516,7 +518,8 @@ import Testing
                 }
                 try DiagnosticCommands.live.encodePNG(image, url)
             },
-            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+            scheduleRemoval: { _, _ in }
         )
         let service = try await makeService(issue: .thumbnail, cachedIDs: [42, 43], commands: commands)
         let report = try await service.prepareReportDirectory()
@@ -531,6 +534,100 @@ import Testing
             "--predicate", "subsystem == \"com.napoleon.Napoleon\""
         ])
         #expect(DiagnosticCommands.unifiedLogArguments.contains("--privacy") == false)
+        #expect(DiagnosticCommands.unifiedLogMaxBytes == 20 * 1_024 * 1_024)
+    }
+
+    @Test func processRunnerTimesOutAndReapsLongRunningProcess() async {
+        let runner = DiagnosticProcessRunner(timeout: 0.02, terminationGracePeriod: 0.02)
+        let startedAt = Date()
+
+        await #expect(throws: DiagnosticProcessRunnerError.timedOut) {
+            try await runner.run(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["5"]
+            )
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 1)
+    }
+
+    @Test func processRunnerStreamsOnlyUpToTheOutputCap() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let runner = DiagnosticProcessRunner(timeout: 1, terminationGracePeriod: 0.02)
+
+        let result = try await runner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: [String(repeating: "x", count: 4_096)],
+            standardOutputURL: outputURL,
+            maxOutputBytes: 64
+        )
+
+        #expect(result.outputTruncated)
+        #expect(try Data(contentsOf: outputURL) == Data(repeating: 120, count: 64))
+    }
+
+    @Test func cancellingProcessRunnerTerminatesAndReapsProcess() async {
+        let started = AsyncSignal()
+        let runner = DiagnosticProcessRunner(
+            timeout: 5,
+            terminationGracePeriod: 0.02,
+            processDidStart: { started.signal() }
+        )
+        let task = Task {
+            try await runner.run(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["5"]
+            )
+        }
+
+        await started.wait()
+        let cancelledAt = Date()
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(Date().timeIntervalSince(cancelledAt) < 1)
+    }
+
+    @Test func processRunnerBoundsOutputDrainAfterDirectProcessExits() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let runner = DiagnosticProcessRunner(timeout: 2, terminationGracePeriod: 0.02)
+        let startedAt = Date()
+
+        let result = try await runner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            arguments: [
+                "-c", "import os, time\n"
+                    + "pid = os.fork()\n"
+                    + "if pid:\n    os._exit(0)\n"
+                    + "os.setsid()\n"
+                    + "time.sleep(1)\n"
+                    + "os._exit(0)"
+            ],
+            standardOutputURL: outputURL,
+            maxOutputBytes: 64
+        )
+
+        #expect(result.terminationStatus == 0)
+        #expect(Date().timeIntervalSince(startedAt) < 0.5)
+    }
+
+    @MainActor @Test func truncatedUnifiedLogUsesStableManifestError() async throws {
+        let commands = DiagnosticCommands(
+            exportUnifiedLog: { _ in throw DiagnosticCommandError.unifiedLogTruncated },
+            encodePNG: DiagnosticCommands.live.encodePNG,
+            zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+            scheduleRemoval: { _, _ in }
+        )
+        let service = try await makeService(issue: .general, commands: commands)
+
+        let report = try await service.prepareReportDirectory()
+
+        #expect(try manifest(at: report).errors == ["unified_log_truncated"])
     }
 
     @MainActor @Test func zipFailureKeepsUncompressedDirectory() async throws {
@@ -546,7 +643,8 @@ import Testing
                 zip: { _, zipURL in
                     try Data("partial zip".utf8).write(to: zipURL)
                     throw StubError.failed
-                }
+                },
+                scheduleRemoval: { _, _ in }
             ),
             now: { Date(timeIntervalSince1970: 10_000) }
         )
@@ -570,7 +668,8 @@ import Testing
             commands: .init(
                 exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
                 encodePNG: DiagnosticCommands.live.encodePNG,
-                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { _, _ in }
             ),
             searchStore: searchStore,
             now: { Date(timeIntervalSince1970: 10_000) }
@@ -592,6 +691,181 @@ import Testing
         service.recordSearch(query: "second", results: [window])
         let events = try await searchStore.events(since: .distantPast)
         #expect(events.map(\.query) == ["second"])
+    }
+
+    @MainActor @Test func everyReportDirectoryGetsAnAbsoluteTwoHourRemovalDeadline() async throws {
+        for issue in [DiagnosticIssue.general, .search, .thumbnail] {
+            let directory = FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            let removals = RemovalRecorder()
+            let service = DiagnosticsService(
+                directory: directory,
+                snapshot: snapshot,
+                cachedThumbnail: { _ in nil },
+                commands: .init(
+                    exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                    encodePNG: DiagnosticCommands.live.encodePNG,
+                    zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                    scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+                ),
+                now: { Date(timeIntervalSince1970: 10_000) }
+            )
+            service.selectIssue(issue)
+
+            let report = try await service.prepareReportDirectory()
+
+            #expect(removals.values == [
+                .init(url: report, deadline: Date(timeIntervalSince1970: 17_200))
+            ])
+        }
+    }
+
+    @MainActor @Test func failedZipAndItsWorkingDirectoryBothGetRemovalDeadlines() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let removals = RemovalRecorder()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in
+                    try Data("partial zip".utf8).write(to: zipURL)
+                    throw StubError.failed
+                },
+                scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+            ),
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+
+        await #expect(throws: StubError.self) { try await service.prepareReport() }
+
+        let values = removals.values
+        #expect(values.count == 2)
+        #expect(values.map(\.deadline) == [
+            Date(timeIntervalSince1970: 17_200),
+            Date(timeIntervalSince1970: 17_200)
+        ])
+        let report = try #require(values.first?.url)
+        #expect(values.map(\.url) == [report, report.appendingPathExtension("zip")])
+    }
+
+    @MainActor @Test func reportPreparationRejectsConcurrentCallsAndRecoversAfterCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let gate = FirstCallGate()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in
+                    await gate.blockFirstCall()
+                    try Data("log".utf8).write(to: url)
+                },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { _, _ in }
+            ),
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+
+        let first = Task { try await service.prepareReportDirectory() }
+        await gate.waitUntilFirstCallStarts()
+
+        await #expect(throws: DiagnosticsServiceError.reportAlreadyInProgress) {
+            try await service.prepareReport()
+        }
+
+        await gate.releaseFirstCall()
+        _ = try await first.value
+        _ = try await service.prepareReportDirectory()
+    }
+}
+
+private final class RemovalRecorder: @unchecked Sendable {
+    struct Value: Equatable {
+        let url: URL
+        let deadline: Date
+    }
+
+    private let lock = NSLock()
+    private var storage: [Value] = []
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(url: URL, deadline: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(.init(url: url, deadline: deadline))
+    }
+}
+
+private actor FirstCallGate {
+    private var callCount = 0
+    private var firstCallStarted = false
+    private var isReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func blockFirstCall() async {
+        callCount += 1
+        guard callCount == 1 else { return }
+
+        firstCallStarted = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilFirstCallStarts() async {
+        guard !firstCallStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstCall() {
+        isReleased = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
+    }
+}
+
+private final class AsyncSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isSignalled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        lock.lock()
+        isSignalled = true
+        let waiters = waiters
+        self.waiters.removeAll()
+        lock.unlock()
+        waiters.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if isSignalled {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
     }
 }
 
@@ -654,7 +928,8 @@ private func makeService(
     let commands = override ?? DiagnosticCommands(
         exportUnifiedLog: { url in try Data("fixed log".utf8).write(to: url) },
         encodePNG: DiagnosticCommands.live.encodePNG,
-        zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) }
+        zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+        scheduleRemoval: { _, _ in }
     )
     let service = DiagnosticsService(
         directory: directory,
