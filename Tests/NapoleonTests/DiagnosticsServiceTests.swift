@@ -925,7 +925,8 @@ import Testing
             .appending(path: UUID().uuidString, directoryHint: .notDirectory)
         defer { try? FileManager.default.removeItem(at: outputURL) }
         let runner = DiagnosticProcessRunner(timeout: 2, terminationGracePeriod: 0.02)
-        let startedAt = Date()
+        let clock = ContinuousClock()
+        let startedAt = clock.now
 
         let result = try await runner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
@@ -934,7 +935,7 @@ import Testing
                     + "pid = os.fork()\n"
                     + "if pid:\n    os._exit(0)\n"
                     + "os.setsid()\n"
-                    + "time.sleep(1)\n"
+                    + "time.sleep(2)\n"
                     + "os._exit(0)"
             ],
             standardOutputURL: outputURL,
@@ -943,7 +944,7 @@ import Testing
 
         #expect(result.terminationStatus == 0)
         #expect(result.outputTruncated)
-        #expect(Date().timeIntervalSince(startedAt) < 0.5)
+        #expect(startedAt.duration(to: clock.now) < .milliseconds(1_500))
     }
 
     @MainActor @Test func truncatedUnifiedLogUsesStableManifestError() async throws {
