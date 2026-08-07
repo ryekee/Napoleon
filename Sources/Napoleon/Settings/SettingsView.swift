@@ -1,6 +1,26 @@
 import NapoleonCore
 import SwiftUI
 
+/// 设置页里的文字操作按钮统一为同一外框尺寸；图标按钮、快捷键录制器等专用控件不在此范围。
+struct SettingsActionButton<Label: View>: View {
+    private let action: () -> Void
+    private let label: Label
+
+    init(action: @escaping () -> Void, @ViewBuilder label: () -> Label) {
+        self.action = action
+        self.label = label()
+    }
+
+    var body: some View {
+        Button(action: action) {
+            label
+                .frame(maxWidth: .infinity)
+        }
+        .frame(width: 140)
+        .controlSize(.regular)
+    }
+}
+
 /// 菜单栏 App 的设置界面。
 ///
 /// 直接读写 `AppServices.shared` 的几个 `ObservableObject`（设置/权限/登录项/更新检查）——它们
@@ -84,8 +104,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Restore Defaults") {
+                    SettingsActionButton {
                         settings.resetHotkeysToDefaults()
+                    } label: {
+                        Text("Restore Defaults")
                     }
                     .disabled(settings.hotkeysAreDefault)
                 }
@@ -133,7 +155,9 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                         Spacer()
-                        Button("Relaunch Now") { relaunch() }
+                        SettingsActionButton(action: relaunch) {
+                            Text("Relaunch Now")
+                        }
                     }
                 }
                 if let relaunchError {
@@ -259,7 +283,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !permissions.screenRecordingGranted {
-                    Button("Request Access") { permissions.requestScreenRecordingAccess() }
+                    SettingsActionButton {
+                        permissions.requestScreenRecordingAccess()
+                    } label: {
+                        Text("Request Access")
+                    }
                 }
             }
 
@@ -283,7 +311,9 @@ struct SettingsView: View {
                 .foregroundStyle(granted ? .green : .orange)
             Text(granted ? grantedText : missingText)
             Spacer()
-            Button("Open System Settings", action: action)
+            SettingsActionButton(action: action) {
+                Text("Open System Settings")
+            }
         }
     }
 

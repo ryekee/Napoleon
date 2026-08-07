@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Napoleon
 
@@ -42,6 +43,18 @@ import Testing
             AboutDiagnosticsPresentation.privacyDisclosure(for: .thumbnail, locale: english)
                 == "Adds cached window images. Napoleon does not separately add search text, window titles, or file paths, but they may appear in the images. No new screenshots are taken."
         )
+    }
+
+    @Test func settingsActionButtonsUseTheSameSizeAcrossLabels() {
+        let updateButton = NSHostingView(rootView: SettingsActionButton(action: {}) {
+            Text("Check for Updates")
+        })
+        let diagnosticsButton = NSHostingView(rootView: SettingsActionButton(action: {}) {
+            Text("Prepare Email…")
+        })
+
+        #expect(abs(updateButton.fittingSize.width - diagnosticsButton.fittingSize.width) < 0.5)
+        #expect(abs(updateButton.fittingSize.height - diagnosticsButton.fittingSize.height) < 0.5)
     }
 
     @Test func diagnosticMessagesHaveCompleteFourLanguageTranslations() throws {

@@ -209,7 +209,7 @@ struct AboutView: View {
             HStack(alignment: .firstTextBaseline) {
                 statusLabel
                 Spacer()
-                Button {
+                SettingsActionButton {
                     Task { await updateChecker.check() }
                 } label: {
                     if case .checking = updateChecker.state {
@@ -218,6 +218,7 @@ struct AboutView: View {
                         Text("Check for Updates")
                     }
                 }
+                .accessibilityIdentifier("about.checkForUpdates")
                 .disabled(updateChecker.state == .checking)
             }
 
@@ -266,8 +267,10 @@ struct AboutView: View {
                 }
                 .frame(maxHeight: 140)
             }
-            Button("Download \(version)") {
+            SettingsActionButton {
                 NSWorkspace.shared.open(url)
+            } label: {
+                Text("Download \(version)")
             }
             .buttonStyle(.borderedProminent)
         }
@@ -280,18 +283,38 @@ struct AboutView: View {
             Text("Diagnostics")
                 .font(.headline)
 
-            Picker("Issue to diagnose", selection: Binding(
-                get: { presentation.selectedIssue },
-                set: { newIssue in
-                    guard presentation.selectIssue(newIssue) else { return }
-                    diagnostics.selectIssue(newIssue)
+            HStack {
+                Picker("Issue to diagnose", selection: Binding(
+                    get: { presentation.selectedIssue },
+                    set: { newIssue in
+                        guard presentation.selectIssue(newIssue) else { return }
+                        diagnostics.selectIssue(newIssue)
+                    }
+                )) {
+                    ForEach(DiagnosticIssue.allCases) { issue in
+                        Text(issueTitle(issue)).tag(issue)
+                    }
                 }
-            )) {
-                ForEach(DiagnosticIssue.allCases) { issue in
-                    Text(issueTitle(issue)).tag(issue)
+                .accessibilityIdentifier("about.issuePicker")
+                .disabled(presentation.isPreparing)
+
+                Spacer()
+
+                SettingsActionButton(action: prepareDiagnosticsEmail) {
+                    HStack(spacing: 6) {
+                        if presentation.isPreparing {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Preparing…")
+                        } else {
+                            Text("Prepare Email…")
+                        }
+                    }
                 }
+                .accessibilityIdentifier("about.prepareEmail")
+                .buttonStyle(.borderedProminent)
+                .disabled(presentation.isPreparing)
             }
-            .disabled(presentation.isPreparing)
 
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "hand.raised")
@@ -316,23 +339,6 @@ struct AboutView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack {
-                Spacer()
-                Button(action: prepareDiagnosticsEmail) {
-                    HStack(spacing: 6) {
-                        if presentation.isPreparing {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Preparing…")
-                        } else {
-                            Text("Prepare Email…")
-                        }
-                    }
-                    .frame(width: 140)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(presentation.isPreparing)
-            }
         }
         .padding(20)
     }
