@@ -9,13 +9,16 @@ import SwiftUI
 final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
     enum Result: Equatable {
         case shared
-        case failed
+        case unavailableOrFailed
+        case cancelled
     }
 
     typealias ServiceProvider = @MainActor () -> NSSharingService?
+    typealias CanPerform = @MainActor (NSSharingService, [Any]) -> Bool
     typealias Perform = @MainActor (NSSharingService, [Any]) -> Void
 
     private let serviceProvider: ServiceProvider
+    private let canPerform: CanPerform
     private let perform: Perform
     private var retainedService: NSSharingService?
     private var continuation: CheckedContinuation<Result, Never>?
@@ -24,23 +27,33 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
         serviceProvider: @escaping ServiceProvider = {
             NSSharingService(named: .composeEmail)
         },
+        canPerform: @escaping CanPerform = { service, items in
+            service.canPerform(withItems: items)
+        },
         perform: @escaping Perform = { service, items in
             service.perform(withItems: items)
         }
     ) {
         self.serviceProvider = serviceProvider
+        self.canPerform = canPerform
         self.perform = perform
     }
 
     func compose(attachment: URL) async -> Result {
         // 上层 presentation 已保证单飞；这里再拒绝意外的并发调用，
         // 避免新 continuation 覆盖仍在等回调的旧 continuation。
-        guard continuation == nil else { return .failed }
+        guard continuation == nil else { return .unavailableOrFailed }
 
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             guard let service = serviceProvider() else {
-                resolve(.failed)
+                resolve(.unavailableOrFailed)
+                return
+            }
+
+            let items: [Any] = [attachment]
+            guard canPerform(service, items) else {
+                resolve(.unavailableOrFailed)
                 return
             }
 
@@ -48,7 +61,7 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
             service.delegate = self
             service.recipients = ["hi@ryek.ee"]
             service.subject = "Napoleon diagnostics"
-            perform(service, [attachment])
+            perform(service, items)
         }
     }
 
@@ -63,7 +76,12 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
         error: any Error
     ) {
         guard sharingService === retainedService else { return }
-        resolve(.failed)
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSUserCancelledError {
+            resolve(.cancelled)
+        } else {
+            resolve(.unavailableOrFailed)
+        }
     }
 
     private func resolve(_ result: Result) {
@@ -83,6 +101,7 @@ final class EmailDraftComposer: NSObject, NSSharingServiceDelegate {
 final class AboutDiagnosticsPresentation: ObservableObject {
     enum Completion {
         case handedOff(requiresManualAttachment: Bool)
+        case cancelled
         case failed(String)
     }
 
@@ -90,6 +109,11 @@ final class AboutDiagnosticsPresentation: ObservableObject {
     @Published private(set) var isPreparing = false
     @Published private(set) var error: String?
     @Published private(set) var requiresManualAttachment = false
+    @Published private(set) var emailDraftWasCancelled = false
+
+    var isRecordingSearchDetails: Bool {
+        selectedIssue == .search
+    }
 
     private let emailComposer: EmailDraftComposer
 
@@ -103,6 +127,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         selectedIssue = issue
         error = nil
         requiresManualAttachment = false
+        emailDraftWasCancelled = false
         return true
     }
 
@@ -112,6 +137,7 @@ final class AboutDiagnosticsPresentation: ObservableObject {
         isPreparing = true
         error = nil
         requiresManualAttachment = false
+        emailDraftWasCancelled = false
         return true
     }
 
@@ -124,15 +150,42 @@ final class AboutDiagnosticsPresentation: ObservableObject {
             selectedIssue = .general
             error = nil
             self.requiresManualAttachment = requiresManualAttachment
+            emailDraftWasCancelled = false
+        case .cancelled:
+            error = nil
+            requiresManualAttachment = false
+            emailDraftWasCancelled = true
         case .failed(let message):
             error = message
             requiresManualAttachment = false
+            emailDraftWasCancelled = false
+        }
+    }
+
+    static func privacyDisclosure(for issue: DiagnosticIssue, locale: Locale = .current) -> String {
+        switch issue {
+        case .general:
+            String(
+                localized: "Includes app names, Bundle IDs, window counts and IDs, permission states, hotkey events, durations, and error codes. Excludes window titles, searches, file paths, and images.",
+                locale: locale
+            )
+        case .search:
+            String(
+                localized: "Adds raw search text and matching window titles. Napoleon does not separately read file paths or images, but the text itself may contain file names or paths.",
+                locale: locale
+            )
+        case .thumbnail:
+            String(
+                localized: "Adds cached window images. Napoleon does not separately add search text, window titles, or file paths, but they may appear in the images. No new screenshots are taken.",
+                locale: locale
+            )
         }
     }
 
     /// 只有 sharing service 回调 `didShareItems` 才视为系统邮件交接成功。
-    /// `didFailToShareItems` 或系统没有 Email service 时先进入手动附件 fallback，
-    /// 然后才统一清理原始报告状态。两条路径都不代表用户最终点击了 Send。
+    /// 非取消的 `didFailToShareItems` 或系统没有可用 Email service 时先进入手动附件 fallback，
+    /// 然后才统一清理原始报告状态；用户取消只结束进度并保留当前 issue。
+    /// 所有路径都不代表用户最终点击了 Send。
     func handOffPreparedReport(
         _ attachment: URL,
         openFallback: @MainActor (URL) -> Void,
@@ -140,13 +193,17 @@ final class AboutDiagnosticsPresentation: ObservableObject {
     ) async {
         guard isPreparing else { return }
 
-        let result = await emailComposer.compose(attachment: attachment)
-        let requiresManualAttachment = result == .failed
-        if requiresManualAttachment {
+        switch await emailComposer.compose(attachment: attachment) {
+        case .shared:
+            markHandedOff()
+            finishPreparation(.handedOff(requiresManualAttachment: false))
+        case .unavailableOrFailed:
             openFallback(attachment)
+            markHandedOff()
+            finishPreparation(.handedOff(requiresManualAttachment: true))
+        case .cancelled:
+            finishPreparation(.cancelled)
         }
-        markHandedOff()
-        finishPreparation(.handedOff(requiresManualAttachment: requiresManualAttachment))
     }
 }
 
@@ -305,10 +362,16 @@ struct AboutView: View {
                 Image(systemName: "hand.raised")
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text(issuePrivacyDescription)
+                Text(verbatim: issuePrivacyDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if presentation.isRecordingSearchDetails {
+                Label("Recording search details", systemImage: "record.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -343,15 +406,8 @@ struct AboutView: View {
         }
     }
 
-    private var issuePrivacyDescription: LocalizedStringKey {
-        switch presentation.selectedIssue {
-        case .general:
-            "Includes app names, Bundle IDs, window counts and IDs, permission states, hotkey events, durations, and error codes. Excludes window titles, searches, file paths, and images."
-        case .search:
-            "Adds search text and matching window titles. Excludes file paths and images."
-        case .thumbnail:
-            "Adds cached window thumbnails. Excludes search text, window titles, file paths, and new screenshots."
-        }
+    private var issuePrivacyDescription: String {
+        AboutDiagnosticsPresentation.privacyDisclosure(for: presentation.selectedIssue)
     }
 
     @ViewBuilder
@@ -362,6 +418,9 @@ struct AboutView: View {
         } else if presentation.requiresManualAttachment {
             Text("Could not attach the ZIP automatically. Add it to the email draft from Finder.")
                 .foregroundStyle(.orange)
+        } else if presentation.emailDraftWasCancelled {
+            Text("Email draft cancelled; the ZIP will remain on this Mac for up to two hours.")
+                .foregroundStyle(.secondary)
         } else {
             Text("Napoleon does not upload logs directly. Your email client may sync the draft and attachment. Review the email before sending.")
                 .foregroundStyle(.secondary)

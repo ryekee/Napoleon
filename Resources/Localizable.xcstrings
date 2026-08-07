@@ -1,60 +1,89 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "Adds cached window thumbnails. Excludes search text, window titles, file paths, and new screenshots.": {
+    "A diagnostic report is already being prepared.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Adds cached window thumbnails. Excludes search text, window titles, file paths, and new screenshots."
+            "value": "A diagnostic report is already being prepared."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "增加缓存的窗口缩略图，不包含搜索内容、窗口标题、文件路径或新截图。"
+            "value": "正在生成另一份诊断报告。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "增加快取的視窗縮圖，不包含搜尋內容、視窗標題、檔案路徑或新截圖。"
+            "value": "正在準備另一份診斷報告。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "キャッシュ済みウインドウサムネイルを追加します。検索内容、ウインドウタイトル、ファイルパス、新しいスクリーンショットは含みません。"
+            "value": "別の診断レポートを作成中です。"
           }
         }
       }
     },
-    "Adds search text and matching window titles. Excludes file paths and images.": {
+    "Adds cached window images. Napoleon does not separately add search text, window titles, or file paths, but they may appear in the images. No new screenshots are taken.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Adds search text and matching window titles. Excludes file paths and images."
+            "value": "Adds cached window images. Napoleon does not separately add search text, window titles, or file paths, but they may appear in the images. No new screenshots are taken."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "增加搜索内容和匹配的窗口标题，不包含文件路径或图片。"
+            "value": "添加缓存的窗口图像。Napoleon 不会单独添加搜索文本、窗口标题或文件路径，但这些内容可能显示在图像中。不会新截取屏幕截图。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "增加搜尋內容和符合的視窗標題，不包含檔案路徑或圖片。"
+            "value": "加入快取的視窗影像。Napoleon 不會另外加入搜尋文字、視窗標題或檔案路徑，但這些內容可能顯示在影像中。不會擷取新的螢幕截圖。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "検索内容と一致したウインドウタイトルを追加します。ファイルパスと画像は含みません。"
+            "value": "キャッシュ済みのウインドウ画像を追加します。Napoleon が検索テキスト、ウインドウタイトル、ファイルパスを個別に追加することはありませんが、それらが画像内に表示されている場合があります。新しいスクリーンショットは撮影しません。"
+          }
+        }
+      }
+    },
+    "Adds raw search text and matching window titles. Napoleon does not separately read file paths or images, but the text itself may contain file names or paths.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adds raw search text and matching window titles. Napoleon does not separately read file paths or images, but the text itself may contain file names or paths."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加原始搜索文本和匹配的窗口标题。Napoleon 不会单独读取文件路径或图像，但文本本身可能包含文件名或路径。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加入原始搜尋文字與相符的視窗標題。Napoleon 不會另外讀取檔案路徑或影像，但文字本身可能包含檔案名稱或路徑。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "検索テキストの原文と一致したウインドウタイトルを追加します。Napoleon がファイルパスや画像を個別に読み取ることはありませんが、テキスト自体にファイル名やパスが含まれる場合があります。"
           }
         }
       }
@@ -88,6 +117,35 @@
         }
       }
     },
+    "Could not create the diagnostic ZIP. Try again; the uncompressed report is still available.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not create the diagnostic ZIP. Try again; the uncompressed report is still available."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法创建诊断 ZIP。请重试；未压缩的报告仍保留在本机。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法建立診斷 ZIP。請再試一次；未壓縮的報告仍保留在此 Mac。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "診断 ZIP を作成できませんでした。もう一度お試しください。圧縮前のレポートはこの Mac に残っています。"
+          }
+        }
+      }
+    },
     "Could not prepare diagnostics: %@": {
       "extractionState": "manual",
       "localizations": {
@@ -117,6 +175,35 @@
         }
       }
     },
+    "Creating the diagnostic ZIP timed out. Try again; the uncompressed report is still available.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Creating the diagnostic ZIP timed out. Try again; the uncompressed report is still available."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建诊断 ZIP 超时。请重试；未压缩的报告仍保留在本机。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建立診斷 ZIP 逾時。請再試一次；未壓縮的報告仍保留在此 Mac。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "診断 ZIP の作成がタイムアウトしました。もう一度お試しください。圧縮前のレポートはこの Mac に残っています。"
+          }
+        }
+      }
+    },
     "Diagnostics": {
       "extractionState": "manual",
       "localizations": {
@@ -142,6 +229,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "診断ログ"
+          }
+        }
+      }
+    },
+    "Email draft cancelled; the ZIP will remain on this Mac for up to two hours.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Email draft cancelled; the ZIP will remain on this Mac for up to two hours."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邮件草稿已取消；ZIP 最多在本机保留两小时。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "郵件草稿已取消；ZIP 最多會在此 Mac 保留兩小時。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メールの下書きをキャンセルしました。ZIP はこの Mac に最長2時間保持されます。"
           }
         }
       }
@@ -316,6 +432,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "準備中…"
+          }
+        }
+      }
+    },
+    "Recording search details": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording search details"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在记录搜索详情"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在記錄搜尋詳細資料"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "検索の詳細を記録中"
           }
         }
       }
