@@ -815,12 +815,20 @@ enum DiagnosticsServiceError: Error, Equatable, Sendable {
 }
 
 final class SearchDiagnosticStore: @unchecked Sendable {
+    typealias FileRemovalRetrySchedule = @Sendable (
+        TimeInterval,
+        @escaping @Sendable () -> Void
+    ) -> Void
+
     let fileURL: URL
 
     private let directory: URL
     private let now: @Sendable () -> Date
     private let closeAppendFile: @Sendable (FileHandle) throws -> Void
     private let removeOrphanFile: @Sendable (URL) throws -> Void
+    private let removeSearchFile: @Sendable (URL) throws -> Void
+    private let scheduleFileRemovalRetry: FileRemovalRetrySchedule
+    private let logSearchFileRemovalFailure: @Sendable (String) -> Void
     private let queue = DispatchQueue(label: "com.ryekee.napoleon.search-diagnostics", qos: .utility)
     private var isActive = false
     private var storedEvents: [DiagnosticSearchEvent] = []
@@ -831,6 +839,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     private var pendingFileError: Error?
     private var fileIdentity: FileIdentity?
     private var fileNeedsRewrite = false
+    private var fileRemovalToken: UUID?
 
     init(
         directory: URL,
@@ -840,12 +849,29 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             guard Darwin.unlink(url.path) == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
+        },
+        removeSearchFile: @escaping @Sendable (URL) throws -> Void = { url in
+            guard Darwin.unlink(url.path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        },
+        scheduleFileRemovalRetry: @escaping FileRemovalRetrySchedule = { delay, action in
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + max(0, delay),
+                execute: action
+            )
+        },
+        logSearchFileRemovalFailure: @escaping @Sendable (String) -> Void = { _ in
+            SearchDiagnosticStore.logger.error("search_diagnostics_delete_failed")
         }
     ) {
         self.directory = directory
         self.now = now
         self.closeAppendFile = closeAppendFile
         self.removeOrphanFile = removeOrphanFile
+        self.removeSearchFile = removeSearchFile
+        self.scheduleFileRemovalRetry = scheduleFileRemovalRetry
+        self.logSearchFileRemovalFailure = logSearchFileRemovalFailure
         fileURL = directory.appending(path: "search-diagnostics.jsonl", directoryHint: .notDirectory)
     }
 
@@ -939,13 +965,24 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     }
 
     private static let retentionInterval: TimeInterval = 7_200
+    private static let fileRemovalRetryDelays: [TimeInterval] = [1, 5, 30]
     private static let temporaryFilePrefix = ".search-diagnostics-"
     private static let temporaryFileSuffix = ".tmp"
+    private static let logger = Logger(
+        subsystem: "com.napoleon.Napoleon",
+        category: "search-diagnostics"
+    )
 
     private struct FileIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
         let length: Int64
+    }
+
+    private struct FileRemovalIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let fileType: mode_t
     }
 
     private enum FileError: Error {
@@ -962,15 +999,103 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
     @discardableResult
     private func removeFile() -> Bool {
+        let token = UUID()
+        fileRemovalToken = token
+
+        let expectedIdentity: FileRemovalIdentity
         do {
-            try FileManager.default.removeItem(at: fileURL)
-            return true
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            return true
+            guard let identity = try fileRemovalIdentity() else {
+                clearFileRemoval(token: token)
+                return true
+            }
+            expectedIdentity = identity
         } catch {
             recordFileError(error)
+            clearFileRemoval(token: token)
+            logSearchFileRemovalFailure("search_diagnostics_delete_failed")
             return false
         }
+
+        return attemptFileRemoval(
+            expectedIdentity: expectedIdentity,
+            retryIndex: 0,
+            token: token
+        )
+    }
+
+    @discardableResult
+    private func attemptFileRemoval(
+        expectedIdentity: FileRemovalIdentity,
+        retryIndex: Int,
+        token: UUID
+    ) -> Bool {
+        guard fileRemovalToken == token else { return false }
+
+        do {
+            guard let currentIdentity = try fileRemovalIdentity() else {
+                clearFileRemoval(token: token)
+                return true
+            }
+            guard currentIdentity == expectedIdentity else {
+                clearFileRemoval(token: token)
+                return true
+            }
+            try removeSearchFile(fileURL)
+            clearFileRemoval(token: token)
+            return true
+        } catch {
+            if Self.isFileNotFound(error) {
+                clearFileRemoval(token: token)
+                return true
+            }
+
+            recordFileError(error)
+            if retryIndex < Self.fileRemovalRetryDelays.count {
+                let delay = Self.fileRemovalRetryDelays[retryIndex]
+                scheduleFileRemovalRetry(delay) { [self] in
+                    queue.async { [self] in
+                        _ = attemptFileRemoval(
+                            expectedIdentity: expectedIdentity,
+                            retryIndex: retryIndex + 1,
+                            token: token
+                        )
+                    }
+                }
+            } else {
+                clearFileRemoval(token: token)
+                logSearchFileRemovalFailure("search_diagnostics_delete_failed")
+            }
+            return false
+        }
+    }
+
+    private func fileRemovalIdentity() throws -> FileRemovalIdentity? {
+        var metadata = stat()
+        guard Darwin.lstat(fileURL.path, &metadata) == 0 else {
+            if errno == ENOENT { return nil }
+            throw currentPOSIXError()
+        }
+        let fileType = metadata.st_mode & S_IFMT
+        guard fileType == S_IFREG || fileType == S_IFLNK else {
+            throw FileError.unexpectedFile
+        }
+        return .init(
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino),
+            fileType: fileType
+        )
+    }
+
+    private func clearFileRemoval(token: UUID) {
+        if fileRemovalToken == token {
+            fileRemovalToken = nil
+        }
+    }
+
+    private static func isFileNotFound(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError)
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
     }
 
     private func removeOrphanTemporaryFiles() {

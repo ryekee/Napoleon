@@ -42,6 +42,180 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: store.fileURL.path) == false)
     }
 
+    @Test func discardRetriesOneOrTwoTransientSearchFileRemovalFailures() async throws {
+        for failureCount in [1, 2] {
+            let directory = FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appending(path: "search-diagnostics.jsonl")
+            let symbolicLinkTarget: URL?
+            if failureCount == 1 {
+                try Data("private regular".utf8).write(to: fileURL)
+                symbolicLinkTarget = nil
+            } else {
+                let target = directory.appending(path: "private-target")
+                try Data("private target".utf8).write(to: target)
+                try FileManager.default.createSymbolicLink(at: fileURL, withDestinationURL: target)
+                symbolicLinkTarget = target
+            }
+            let harness = SearchFileRemovalHarness(failuresBeforeSuccess: failureCount)
+            let store = SearchDiagnosticStore(
+                directory: directory,
+                removeSearchFile: { url in try harness.remove(url) },
+                scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+                logSearchFileRemovalFailure: { code in harness.log(code) }
+            )
+
+            store.discard()
+            try await waitForSearchRemovalAttempts(failureCount + 1, in: harness)
+
+            #expect(FileManager.default.fileExists(atPath: fileURL.path) == false)
+            #expect(harness.scheduledDelays == Array([1.0, 5.0].prefix(failureCount)))
+            #expect(harness.errorCodes.isEmpty)
+            if let symbolicLinkTarget {
+                #expect(try String(contentsOf: symbolicLinkTarget, encoding: .utf8) == "private target")
+            }
+        }
+    }
+
+    @MainActor @Test func leavingSearchRetriesSensitiveFileRemovalWithoutEventsCall() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let harness = SearchFileRemovalHarness(failuresBeforeSuccess: 1)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { .searchDiagnosticTestNow },
+            removeSearchFile: { url in try harness.remove(url) },
+            scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+            logSearchFileRemovalFailure: { code in harness.log(code) }
+        )
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { _, _ in }
+            ),
+            searchStore: store,
+            now: { .searchDiagnosticTestNow }
+        )
+
+        service.selectIssue(.search)
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "private"))
+        try await waitForSearchLineCount(1, at: store.fileURL)
+        service.selectIssue(.general)
+        try await waitForSearchRemovalAttempts(2, in: harness)
+
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path) == false)
+        #expect(harness.scheduledDelays == [1])
+    }
+
+    @Test func expiryTimerRetriesSensitiveFileRemovalWithoutEventsCall() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let now = Date(timeIntervalSince1970: 7_200)
+        let harness = SearchFileRemovalHarness(failuresBeforeSuccess: 1)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { now },
+            removeSearchFile: { url in try harness.remove(url) },
+            scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+            logSearchFileRemovalFailure: { code in harness.log(code) }
+        )
+
+        store.begin()
+        store.append(.fixture(timestamp: Date(timeIntervalSince1970: 0), query: "expired private"))
+        try await waitForSearchRemovalAttempts(2, in: harness)
+
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path) == false)
+        #expect(harness.scheduledDelays == [1])
+    }
+
+    @Test func exhaustedSearchFileRemovalRetriesLogAndExposeTheFinalErrorOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appending(path: "search-diagnostics.jsonl")
+        try Data("private".utf8).write(to: fileURL)
+        let harness = SearchFileRemovalHarness(failuresBeforeSuccess: .max)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            removeSearchFile: { url in try harness.remove(url) },
+            scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+            logSearchFileRemovalFailure: { code in harness.log(code) }
+        )
+
+        store.discard()
+        try await waitForSearchRemovalAttempts(4, in: harness)
+
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
+        #expect(harness.scheduledDelays == [1, 5, 30])
+        #expect(harness.errorCodes == ["search_diagnostics_delete_failed"])
+        var observedFinalError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch SearchStoreTestError.injectedSearchFileRemovalFailure {
+            observedFinalError = true
+        }
+        #expect(observedFinalError)
+        #expect(try await store.events(since: .distantPast).isEmpty)
+    }
+
+    @Test func successfulDefaultSearchFileRemovalSchedulesNoRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appending(path: "search-diagnostics.jsonl")
+        try Data("private".utf8).write(to: fileURL)
+        let harness = SearchFileRemovalHarness(failuresBeforeSuccess: 0)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+            logSearchFileRemovalFailure: { code in harness.log(code) }
+        )
+
+        store.discard()
+        _ = try await store.events(since: .distantPast)
+
+        #expect(FileManager.default.fileExists(atPath: fileURL.path) == false)
+        #expect(harness.scheduledDelays.isEmpty)
+        #expect(harness.errorCodes.isEmpty)
+    }
+
+    @Test func retryDoesNotDeleteAReplacementAtTheSensitiveFilePath() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appending(path: "search-diagnostics.jsonl")
+        try Data("original private".utf8).write(to: fileURL)
+        let harness = SearchFileRemovalHarness(failuresBeforeSuccess: 1, defersRetries: true)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            removeSearchFile: { url in try harness.remove(url) },
+            scheduleFileRemovalRetry: { delay, action in harness.schedule(delay, action: action) },
+            logSearchFileRemovalFailure: { code in harness.log(code) }
+        )
+
+        store.discard()
+        try await waitForSearchRemovalAttempts(1, in: harness)
+        try FileManager.default.removeItem(at: fileURL)
+        let replacementTarget = directory.appending(path: "replacement-target")
+        try Data("replacement".utf8).write(to: replacementTarget)
+        try FileManager.default.createSymbolicLink(at: fileURL, withDestinationURL: replacementTarget)
+        harness.runNextRetry()
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch SearchStoreTestError.injectedSearchFileRemovalFailure {}
+
+        #expect(harness.removeAttempts == 1)
+        #expect(isSymbolicLink(at: fileURL))
+        #expect(try String(contentsOf: replacementTarget, encoding: .utf8) == "replacement")
+        #expect(harness.errorCodes.isEmpty)
+    }
+
     @Test func inactiveStoreDoesNotTouchExistingSearchFile() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -1285,9 +1459,69 @@ private extension Date {
 
 private enum SearchStoreTestError: Error {
     case injectedOrphanCleanupFailure
+    case injectedSearchFileRemovalFailure
     case missingInode
     case injectedCloseFailure
     case timedOutWaitingForLineCount(Int)
+    case timedOutWaitingForRemovalAttempts(Int)
+}
+
+private final class SearchFileRemovalHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private let defersRetries: Bool
+    private var remainingFailures: Int
+    private var attempts = 0
+    private var delays: [TimeInterval] = []
+    private var codes: [String] = []
+    private var retries: [@Sendable () -> Void] = []
+
+    init(failuresBeforeSuccess: Int, defersRetries: Bool = false) {
+        remainingFailures = failuresBeforeSuccess
+        self.defersRetries = defersRetries
+    }
+
+    var removeAttempts: Int { lock.withLock { attempts } }
+    var scheduledDelays: [TimeInterval] { lock.withLock { delays } }
+    var errorCodes: [String] { lock.withLock { codes } }
+
+    func remove(_ url: URL) throws {
+        let shouldFail = lock.withLock {
+            attempts += 1
+            guard remainingFailures > 0 else { return false }
+            remainingFailures -= 1
+            return true
+        }
+        if shouldFail {
+            throw SearchStoreTestError.injectedSearchFileRemovalFailure
+        }
+        guard Darwin.unlink(url.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    func schedule(_ delay: TimeInterval, action: @escaping @Sendable () -> Void) {
+        let shouldRun = lock.withLock {
+            delays.append(delay)
+            if defersRetries {
+                retries.append(action)
+                return false
+            }
+            return true
+        }
+        if shouldRun { action() }
+    }
+
+    func runNextRetry() {
+        let action: (@Sendable () -> Void)? = lock.withLock {
+            guard !retries.isEmpty else { return nil }
+            return retries.removeFirst()
+        }
+        action?()
+    }
+
+    func log(_ code: String) {
+        lock.withLock { codes.append(code) }
+    }
 }
 
 private final class OneShotCloseFailure: @unchecked Sendable {
@@ -1380,6 +1614,17 @@ private func waitForSearchQueries(_ queries: [String], at fileURL: URL) async th
         try await Task.sleep(nanoseconds: 5_000_000)
     }
     throw SearchStoreTestError.timedOutWaitingForLineCount(queries.count)
+}
+
+private func waitForSearchRemovalAttempts(
+    _ expectedCount: Int,
+    in harness: SearchFileRemovalHarness
+) async throws {
+    for _ in 0..<200 {
+        if harness.removeAttempts >= expectedCount { return }
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+    throw SearchStoreTestError.timedOutWaitingForRemovalAttempts(expectedCount)
 }
 
 private func isSymbolicLink(at fileURL: URL) -> Bool {
