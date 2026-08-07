@@ -101,6 +101,96 @@ import Testing
         #expect(linkExists == false)
     }
 
+    @Test func beginRemovesOnlyManagedOrphanTemporaryFiles() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let regularOrphan = managedSearchTemporaryURL(in: directory)
+        let symbolicLinkOrphan = managedSearchTemporaryURL(in: directory)
+        let symbolicLinkTarget = directory.appending(path: "orphan-target")
+        let invalidName = directory.appending(path: ".search-diagnostics-not-a-uuid.tmp")
+        let matchingDirectory = managedSearchTemporaryURL(in: directory)
+        try Data("private regular".utf8).write(to: regularOrphan)
+        try Data("private target".utf8).write(to: symbolicLinkTarget)
+        try FileManager.default.createSymbolicLink(at: symbolicLinkOrphan, withDestinationURL: symbolicLinkTarget)
+        try Data("unrelated".utf8).write(to: invalidName)
+        try FileManager.default.createDirectory(at: matchingDirectory, withIntermediateDirectories: false)
+
+        let store = SearchDiagnosticStore(directory: directory)
+        store.begin()
+        _ = try await store.events(since: .distantPast)
+
+        #expect(FileManager.default.fileExists(atPath: regularOrphan.path) == false)
+        #expect(isSymbolicLink(at: symbolicLinkOrphan) == false)
+        #expect(try String(contentsOf: symbolicLinkTarget, encoding: .utf8) == "private target")
+        #expect(FileManager.default.fileExists(atPath: invalidName.path))
+        #expect(FileManager.default.fileExists(atPath: matchingDirectory.path))
+    }
+
+    @Test func discardRemovesManagedOrphanTemporaryFiles() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let orphan = managedSearchTemporaryURL(in: directory)
+        try Data("private".utf8).write(to: orphan)
+        let store = SearchDiagnosticStore(directory: directory)
+
+        store.discard()
+        _ = try await store.events(since: .distantPast)
+
+        #expect(FileManager.default.fileExists(atPath: orphan.path) == false)
+    }
+
+    @Test func orphanCleanupFailureIsReportedExactlyOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let orphan = managedSearchTemporaryURL(in: directory)
+        try Data("private".utf8).write(to: orphan)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            removeOrphanFile: { _ in throw SearchStoreTestError.injectedOrphanCleanupFailure }
+        )
+
+        store.discard()
+        var observedCleanupError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch SearchStoreTestError.injectedOrphanCleanupFailure {
+            observedCleanupError = true
+        }
+
+        #expect(observedCleanupError)
+        #expect(try await store.events(since: .distantPast).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    @Test func atomicRewriteReportsPrimaryErrorBeforeTemporaryCleanupFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let store = SearchDiagnosticStore(
+            directory: directory,
+            now: { .searchDiagnosticTestNow },
+            removeOrphanFile: { _ in throw SearchStoreTestError.injectedOrphanCleanupFailure }
+        )
+        store.begin()
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow, query: "first"))
+        try await waitForSearchQueries(["first"], at: store.fileURL)
+        try FileManager.default.removeItem(at: store.fileURL)
+        try FileManager.default.createDirectory(at: store.fileURL, withIntermediateDirectories: false)
+
+        store.append(.fixture(timestamp: .searchDiagnosticTestNow.addingTimeInterval(1), query: "second"))
+        var observedPrimaryError = false
+        do {
+            _ = try await store.events(since: .distantPast)
+        } catch let error as POSIXError {
+            observedPrimaryError = error.code == .EISDIR
+        }
+
+        #expect(observedPrimaryError)
+        #expect(try managedSearchTemporaryFiles(in: directory).isEmpty == false)
+    }
+
     @Test func exactTwoHourExpiryRemovesTheEvent() async throws {
         let now = Date(timeIntervalSince1970: 7_200)
         let directory = FileManager.default.temporaryDirectory
@@ -593,6 +683,7 @@ private extension Date {
 }
 
 private enum SearchStoreTestError: Error {
+    case injectedOrphanCleanupFailure
     case missingInode
     case injectedCloseFailure
     case timedOutWaitingForLineCount(Int)
@@ -639,6 +730,15 @@ private func makeSearchStore() -> SearchDiagnosticStore {
     let directory = FileManager.default.temporaryDirectory
         .appending(path: UUID().uuidString, directoryHint: .isDirectory)
     return SearchDiagnosticStore(directory: directory, now: { .searchDiagnosticTestNow })
+}
+
+private func managedSearchTemporaryURL(in directory: URL) -> URL {
+    directory.appending(path: ".search-diagnostics-\(UUID().uuidString).tmp")
+}
+
+private func managedSearchTemporaryFiles(in directory: URL) throws -> [URL] {
+    try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        .filter { $0.lastPathComponent.hasPrefix(".search-diagnostics-") && $0.pathExtension == "tmp" }
 }
 
 private func inode(at fileURL: URL) throws -> UInt64 {

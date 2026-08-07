@@ -225,6 +225,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     private let directory: URL
     private let now: @Sendable () -> Date
     private let closeAppendFile: @Sendable (FileHandle) throws -> Void
+    private let removeOrphanFile: @Sendable (URL) throws -> Void
     private let queue = DispatchQueue(label: "com.ryekee.napoleon.search-diagnostics", qos: .utility)
     private var isActive = false
     private var storedEvents: [DiagnosticSearchEvent] = []
@@ -239,11 +240,17 @@ final class SearchDiagnosticStore: @unchecked Sendable {
     init(
         directory: URL,
         now: @escaping @Sendable () -> Date = { Date() },
-        closeAppendFile: @escaping @Sendable (FileHandle) throws -> Void = { try $0.close() }
+        closeAppendFile: @escaping @Sendable (FileHandle) throws -> Void = { try $0.close() },
+        removeOrphanFile: @escaping @Sendable (URL) throws -> Void = { url in
+            guard Darwin.unlink(url.path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
     ) {
         self.directory = directory
         self.now = now
         self.closeAppendFile = closeAppendFile
+        self.removeOrphanFile = removeOrphanFile
         fileURL = directory.appending(path: "search-diagnostics.jsonl", directoryHint: .notDirectory)
     }
 
@@ -259,6 +266,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             self.fileNeedsRewrite = !self.removeFile()
             self.createDirectory()
             self.fileNeedsRewrite = self.fileNeedsRewrite || self.pendingFileError != nil
+            self.removeOrphanTemporaryFiles()
         }
     }
 
@@ -331,10 +339,13 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             self.cancelExpiryTimer()
             self.fileIdentity = nil
             self.fileNeedsRewrite = !self.removeFile()
+            self.removeOrphanTemporaryFiles()
         }
     }
 
     private static let retentionInterval: TimeInterval = 7_200
+    private static let temporaryFilePrefix = ".search-diagnostics-"
+    private static let temporaryFileSuffix = ".tmp"
 
     private struct FileIdentity: Equatable {
         let device: UInt64
@@ -365,6 +376,54 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             recordFileError(error)
             return false
         }
+    }
+
+    private func removeOrphanTemporaryFiles() {
+        let children: [URL]
+        do {
+            children = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsSubdirectoryDescendants]
+            )
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain
+                && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
+            return
+        } catch {
+            recordFileError(error)
+            return
+        }
+
+        for child in children where isManagedTemporaryFileName(child.lastPathComponent) {
+            var metadata = stat()
+            guard Darwin.lstat(child.path, &metadata) == 0 else {
+                if errno != ENOENT {
+                    recordFileError(currentPOSIXError())
+                }
+                continue
+            }
+            let fileType = metadata.st_mode & S_IFMT
+            guard fileType == S_IFREG || fileType == S_IFLNK else { continue }
+
+            do {
+                try removeOrphanFile(child)
+            } catch {
+                recordFileError(error)
+            }
+        }
+    }
+
+    private func isManagedTemporaryFileName(_ name: String) -> Bool {
+        guard name.hasPrefix(Self.temporaryFilePrefix),
+              name.hasSuffix(Self.temporaryFileSuffix) else {
+            return false
+        }
+        let uuidStart = name.index(name.startIndex, offsetBy: Self.temporaryFilePrefix.count)
+        let uuidEnd = name.index(name.endIndex, offsetBy: -Self.temporaryFileSuffix.count)
+        let uuidString = String(name[uuidStart..<uuidEnd])
+        guard let uuid = UUID(uuidString: uuidString) else { return false }
+        return uuid.uuidString.caseInsensitiveCompare(uuidString) == .orderedSame
     }
 
     // ponytail: 搜索诊断由用户临时启用，事件量按低千级上限处理；只有现场数据证明更大时才改分段文件。
@@ -448,13 +507,19 @@ final class SearchDiagnosticStore: @unchecked Sendable {
 
     private func replaceFileAtomically(with data: Data) throws -> FileIdentity {
         let temporaryURL = directory.appending(
-            path: ".search-diagnostics-\(UUID().uuidString).tmp",
+            path: "\(Self.temporaryFilePrefix)\(UUID().uuidString)\(Self.temporaryFileSuffix)",
             directoryHint: .notDirectory
         )
         var renamed = false
+        var temporaryFileCreated = false
         defer {
-            if !renamed {
-                _ = Darwin.unlink(temporaryURL.path)
+            if temporaryFileCreated && !renamed {
+                do {
+                    try removeOrphanFile(temporaryURL)
+                } catch {
+                    // The caller records the primary replace error after this secondary cleanup error.
+                    recordFileError(error)
+                }
             }
         }
 
@@ -464,6 +529,7 @@ final class SearchDiagnosticStore: @unchecked Sendable {
             S_IRUSR | S_IWUSR
         )
         guard descriptor >= 0 else { throw currentPOSIXError() }
+        temporaryFileCreated = true
 
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
         var closed = false
