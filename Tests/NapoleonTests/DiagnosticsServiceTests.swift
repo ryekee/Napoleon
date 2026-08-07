@@ -567,6 +567,26 @@ import Testing
         #expect(try Data(contentsOf: outputURL) == Data(repeating: 120, count: 64))
     }
 
+    @Test func processRunnerKeepsFastOutputPendingMemoryToOneFixedBlock() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let runner = DiagnosticProcessRunner(timeout: 1, terminationGracePeriod: 0.02)
+        let cap = 256 * 1_024
+
+        let result = try await runner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/yes"),
+            arguments: [],
+            standardOutputURL: outputURL,
+            maxOutputBytes: cap
+        )
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+        #expect(result.outputTruncated)
+        #expect(attributes[.size] as? Int == cap)
+        #expect(result.maxPendingOutputBytes <= DiagnosticProcessRunner.outputChunkBytes)
+    }
+
     @Test func cancellingProcessRunnerTerminatesAndReapsProcess() async {
         let started = AsyncSignal()
         let runner = DiagnosticProcessRunner(
@@ -613,6 +633,7 @@ import Testing
         )
 
         #expect(result.terminationStatus == 0)
+        #expect(result.outputTruncated)
         #expect(Date().timeIntervalSince(startedAt) < 0.5)
     }
 
@@ -720,6 +741,151 @@ import Testing
         }
     }
 
+    @MainActor @Test func startupReschedulesOneHourOldSurvivorFromCreationDate() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let survivor = directory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: survivor, withIntermediateDirectories: true)
+        let createdAt = Date(timeIntervalSince1970: 10_000)
+        let restartedAt = createdAt.addingTimeInterval(3_600)
+        try FileManager.default.setAttributes(
+            [.creationDate: createdAt, .modificationDate: restartedAt],
+            ofItemAtPath: survivor.path
+        )
+        let removals = RemovalRecorder()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+            ),
+            now: { restartedAt }
+        )
+
+        _ = try await service.prepareReportDirectory()
+
+        #expect(removals.values.contains { value in
+            value.url.standardizedFileURL.path == survivor.standardizedFileURL.path
+                && value.deadline == createdAt.addingTimeInterval(7_200)
+        })
+        #expect(FileManager.default.fileExists(atPath: survivor.path))
+    }
+
+    @MainActor @Test func startupDeletesExpiredArtifactEvenWhenItsContentsWereUpdated() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let expired = directory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: expired, withIntermediateDirectories: true)
+        let createdAt = Date(timeIntervalSince1970: 10_000)
+        let restartedAt = createdAt.addingTimeInterval(10_800)
+        try FileManager.default.setAttributes(
+            [.creationDate: createdAt, .modificationDate: restartedAt],
+            ofItemAtPath: expired.path
+        )
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try Data("log".utf8).write(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { _, _ in }
+            ),
+            now: { restartedAt }
+        )
+
+        _ = try await service.prepareReportDirectory()
+
+        #expect(FileManager.default.fileExists(atPath: expired.path) == false)
+    }
+
+    @Test func retentionSchedulerRetriesTransientFailureThenSucceeds() {
+        let harness = RetentionHarness(failuresBeforeSuccess: 1)
+        let now = Date(timeIntervalSince1970: 10_000)
+        let deadline = now.addingTimeInterval(100)
+        let scheduler = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [1, 5],
+            removeItem: { url in try harness.remove(url) },
+            schedule: { date, action in harness.schedule(date, action: action) },
+            logError: { code in harness.log(code) }
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        scheduler.scheduleRemoval(url, deadline: deadline)
+
+        #expect(harness.removeAttempts == 2)
+        #expect(harness.scheduledDates == [deadline, now.addingTimeInterval(1)])
+        #expect(harness.errorCodes.isEmpty)
+    }
+
+    @Test func retentionSchedulerLogsStableErrorAfterBoundedRetries() {
+        let harness = RetentionHarness(failuresBeforeSuccess: .max)
+        let now = Date(timeIntervalSince1970: 10_000)
+        let scheduler = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [1, 5],
+            removeItem: { url in try harness.remove(url) },
+            schedule: { date, action in harness.schedule(date, action: action) },
+            logError: { code in harness.log(code) }
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        scheduler.scheduleRemoval(url, deadline: now)
+
+        #expect(harness.removeAttempts == 3)
+        #expect(harness.errorCodes == ["diagnostic_retention_delete_failed"])
+    }
+
+    @Test func retentionSchedulerTreatsOnlyFileNotFoundAsIdempotentSuccess() {
+        let harness = RetentionHarness(failuresBeforeSuccess: 1, failure: .fileNotFound)
+        let now = Date(timeIntervalSince1970: 10_000)
+        let scheduler = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [1, 5],
+            removeItem: { url in try harness.remove(url) },
+            schedule: { date, action in harness.schedule(date, action: action) },
+            logError: { code in harness.log(code) }
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        scheduler.scheduleRemoval(url, deadline: now)
+
+        #expect(harness.removeAttempts == 1)
+        #expect(harness.scheduledDates == [now])
+        #expect(harness.errorCodes.isEmpty)
+    }
+
+    @Test func retentionSchedulerRetainsAcceptedRemovalUntilAttemptRuns() {
+        let harness = DeferredRetentionHarness()
+        let now = Date(timeIntervalSince1970: 10_000)
+        var scheduler: DiagnosticRetentionScheduler? = DiagnosticRetentionScheduler(
+            now: { now },
+            retryDelays: [],
+            removeItem: { url in harness.remove(url) },
+            schedule: { date, action in harness.schedule(date, action: action) },
+            logError: { _ in }
+        )
+        weak let retainedScheduler = scheduler
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        scheduler?.scheduleRemoval(url, deadline: now)
+        scheduler = nil
+
+        #expect(retainedScheduler != nil)
+        harness.runScheduledAction()
+        #expect(harness.removeAttempts == 1)
+    }
+
     @MainActor @Test func failedZipAndItsWorkingDirectoryBothGetRemovalDeadlines() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -783,6 +949,39 @@ import Testing
         _ = try await first.value
         _ = try await service.prepareReportDirectory()
     }
+
+    @MainActor @Test func cancellingPublicPrepareStopsWriterAndReleasesSingleFlight() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let probe = CancellableExportProbe()
+        let removals = RemovalRecorder()
+        let service = DiagnosticsService(
+            directory: directory,
+            snapshot: snapshot,
+            cachedThumbnail: { _ in nil },
+            commands: .init(
+                exportUnifiedLog: { url in try await probe.export(to: url) },
+                encodePNG: DiagnosticCommands.live.encodePNG,
+                zip: { _, zipURL in try Data("zip".utf8).write(to: zipURL) },
+                scheduleRemoval: { url, deadline in removals.record(url: url, deadline: deadline) }
+            ),
+            now: { Date(timeIntervalSince1970: 10_000) }
+        )
+        let preparation = Task { try await service.prepareReportDirectory() }
+        await probe.started.wait()
+
+        let cancelledAt = Date()
+        preparation.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await preparation.value
+        }
+
+        #expect(Date().timeIntervalSince(cancelledAt) < 0.5)
+        #expect(probe.cancellationObserved)
+        let managedPartial = try #require(removals.values.first)
+        #expect(managedPartial.deadline == Date(timeIntervalSince1970: 17_200))
+        _ = try await service.prepareReportDirectory()
+    }
 }
 
 private final class RemovalRecorder: @unchecked Sendable {
@@ -805,6 +1004,83 @@ private final class RemovalRecorder: @unchecked Sendable {
         defer { lock.unlock() }
         storage.append(.init(url: url, deadline: deadline))
     }
+}
+
+private final class RetentionHarness: @unchecked Sendable {
+    enum Failure: Sendable {
+        case transient
+        case fileNotFound
+    }
+
+    private let lock = NSLock()
+    private let failure: Failure
+    private var remainingFailures: Int
+    private var attempts = 0
+    private var dates: [Date] = []
+    private var codes: [String] = []
+
+    init(failuresBeforeSuccess: Int, failure: Failure = .transient) {
+        remainingFailures = failuresBeforeSuccess
+        self.failure = failure
+    }
+
+    var removeAttempts: Int { lock.withLock { attempts } }
+    var scheduledDates: [Date] { lock.withLock { dates } }
+    var errorCodes: [String] { lock.withLock { codes } }
+
+    func remove(_ url: URL) throws {
+        let shouldFail = lock.withLock {
+            attempts += 1
+            guard remainingFailures > 0 else { return false }
+            remainingFailures -= 1
+            return true
+        }
+        if shouldFail {
+            switch failure {
+            case .transient:
+                throw RetentionTestError.transient
+            case .fileNotFound:
+                throw CocoaError(.fileNoSuchFile)
+            }
+        }
+    }
+
+    func schedule(_ date: Date, action: @escaping @Sendable () -> Void) {
+        lock.withLock { dates.append(date) }
+        action()
+    }
+
+    func log(_ code: String) {
+        lock.withLock { codes.append(code) }
+    }
+}
+
+private final class DeferredRetentionHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var action: (@Sendable () -> Void)?
+    private var attempts = 0
+
+    var removeAttempts: Int { lock.withLock { attempts } }
+
+    func remove(_ url: URL) {
+        lock.withLock { attempts += 1 }
+    }
+
+    func schedule(_ date: Date, action: @escaping @Sendable () -> Void) {
+        lock.withLock { self.action = action }
+    }
+
+    func runScheduledAction() {
+        let action = lock.withLock {
+            defer { self.action = nil }
+            return self.action
+        }
+        action?()
+    }
+}
+
+private enum RetentionTestError: Error {
+    case transient
 }
 
 private actor FirstCallGate {
@@ -865,6 +1141,36 @@ private final class AsyncSignal: @unchecked Sendable {
                 waiters.append(continuation)
                 lock.unlock()
             }
+        }
+    }
+}
+
+private final class CancellableExportProbe: @unchecked Sendable {
+    let started = AsyncSignal()
+
+    private let lock = NSLock()
+    private var callCount = 0
+    private var didObserveCancellation = false
+
+    var cancellationObserved: Bool { lock.withLock { didObserveCancellation } }
+
+    func export(to url: URL) async throws {
+        let isFirstCall = lock.withLock {
+            callCount += 1
+            return callCount == 1
+        }
+        guard isFirstCall else {
+            try Data("log".utf8).write(to: url)
+            return
+        }
+
+        started.signal()
+        do {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            try Data("late log".utf8).write(to: url)
+        } catch is CancellationError {
+            lock.withLock { didObserveCancellation = true }
+            throw CancellationError()
         }
     }
 }

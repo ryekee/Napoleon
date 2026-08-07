@@ -5,6 +5,7 @@ import Dispatch
 import Foundation
 import ImageIO
 import NapoleonCore
+import OSLog
 import UniformTypeIdentifiers
 
 enum DiagnosticIssue: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -147,6 +148,7 @@ struct DiagnosticManifest: Codable, Equatable, Sendable {
 struct DiagnosticProcessResult: Equatable, Sendable {
     let terminationStatus: Int32
     let outputTruncated: Bool
+    let maxPendingOutputBytes: Int
 }
 
 enum DiagnosticProcessRunnerError: Error, Equatable, Sendable {
@@ -154,6 +156,8 @@ enum DiagnosticProcessRunnerError: Error, Equatable, Sendable {
 }
 
 struct DiagnosticProcessRunner: Sendable {
+    static let outputChunkBytes = 64 * 1_024
+
     private enum WaitEvent: Sendable {
         case terminated(Int32)
         case timedOut
@@ -196,6 +200,7 @@ struct DiagnosticProcessRunner: Sendable {
                 reader: outputPipe.fileHandleForReading,
                 outputURL: standardOutputURL,
                 maxBytes: maxOutputBytes ?? .max,
+                chunkBytes: Self.outputChunkBytes,
                 controller: controller
             )
             outputPump?.start()
@@ -237,11 +242,12 @@ struct DiagnosticProcessRunner: Sendable {
                 _ = try? await outputPump?.result()
                 throw DiagnosticProcessRunnerError.timedOut
             }
-            let outputTruncated = try await outputPump?.result() ?? false
+            let outputResult = try await outputPump?.result() ?? .empty
             try Task.checkCancellation()
             return .init(
                 terminationStatus: waitResult.status,
-                outputTruncated: outputTruncated
+                outputTruncated: outputResult.isTruncated,
+                maxPendingOutputBytes: outputResult.maxPendingBytes
             )
         } onCancel: {
             controller.requestStop()
@@ -277,104 +283,224 @@ struct DiagnosticProcessRunner: Sendable {
     }
 }
 
+private struct DiagnosticOutputResult: Sendable {
+    static let empty = Self(isTruncated: false, maxPendingBytes: 0)
+
+    let isTruncated: Bool
+    let maxPendingBytes: Int
+}
+
 private final class DiagnosticOutputPump: @unchecked Sendable {
     private let reader: FileHandle
-    private let output: FileHandle
+    private let outputFileDescriptor: Int32
     private let byteLimit: Int
+    private let chunkBytes: Int
     private let controller: DiagnosticProcessController
-    private let queue = DispatchQueue(label: "com.ryekee.napoleon.diagnostic-output", qos: .utility)
-    private var writtenByteCount = 0
-    private var isTruncated = false
-    private var completion: Result<Bool, Error>?
-    private var continuation: CheckedContinuation<Bool, Error>?
+    private let readerQueue = DispatchQueue(label: "com.ryekee.napoleon.diagnostic-output", qos: .utility)
+    private let stateLock = NSLock()
+    private var drainDeadline: DispatchTime?
+    private var isFinishing = false
+    private var completion: Result<DiagnosticOutputResult, Error>?
+    private var continuation: CheckedContinuation<DiagnosticOutputResult, Error>?
 
     init(
         reader: FileHandle,
         outputURL: URL,
         maxBytes: Int,
+        chunkBytes: Int,
         controller: DiagnosticProcessController
     ) throws {
-        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
-            throw CocoaError(.fileWriteUnknown)
+        let outputFileDescriptor = outputURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
         }
+        guard outputFileDescriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let inputFileDescriptor = reader.fileDescriptor
+        let currentFlags = Darwin.fcntl(inputFileDescriptor, F_GETFL)
+        guard currentFlags >= 0,
+              Darwin.fcntl(inputFileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            Darwin.close(outputFileDescriptor)
+            throw error
+        }
+
         self.reader = reader
-        output = try FileHandle(forWritingTo: outputURL)
+        self.outputFileDescriptor = outputFileDescriptor
         byteLimit = max(0, maxBytes)
+        self.chunkBytes = max(1, chunkBytes)
         self.controller = controller
     }
 
     func start() {
-        reader.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            self?.queue.async { [weak self] in
-                self?.consume(data)
-            }
+        readerQueue.async { [self] in
+            runReaderLoop()
         }
     }
 
     func finishAfterDrainPeriod(_ drainPeriod: TimeInterval) {
-        queue.asyncAfter(deadline: .now() + max(0, drainPeriod)) { [self] in
-            finish(.success(isTruncated))
+        let nanoseconds = UInt64(max(0, drainPeriod) * 1_000_000_000)
+        let deadline = DispatchTime.now() + .nanoseconds(Int(clamping: nanoseconds))
+        stateLock.withLock {
+            if drainDeadline == nil || deadline < drainDeadline! {
+                drainDeadline = deadline
+            }
         }
     }
 
     func finishImmediately() {
-        queue.async { [self] in
-            finish(.success(isTruncated))
+        stateLock.withLock {
+            drainDeadline = .now()
         }
     }
 
-    func result() async throws -> Bool {
+    func result() async throws -> DiagnosticOutputResult {
         try await withCheckedThrowingContinuation { continuation in
-            queue.async { [self] in
-                if let completion {
-                    resume(continuation, with: completion)
+            let completed = stateLock.withLock { () -> Result<DiagnosticOutputResult, Error>? in
+                if let completion { return completion }
+                self.continuation = continuation
+                return nil
+            }
+            if let completed {
+                resume(continuation, with: completed)
+            }
+        }
+    }
+
+    private func runReaderLoop() {
+        var buffer = [UInt8](repeating: 0, count: chunkBytes)
+        var writtenByteCount = 0
+        var maxPendingBytes = 0
+
+        while true {
+            if drainPeriodExpired {
+                finish(.success(.init(
+                    isTruncated: true,
+                    maxPendingBytes: maxPendingBytes
+                )))
+                return
+            }
+
+            var descriptor = pollfd(
+                fd: reader.fileDescriptor,
+                events: Int16(POLLIN | POLLHUP | POLLERR),
+                revents: 0
+            )
+            let pollResult = Darwin.poll(&descriptor, 1, pollTimeoutMilliseconds)
+            if pollResult == 0 { continue }
+            if pollResult < 0 {
+                if errno == EINTR { continue }
+                finish(.failure(POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)))
+                return
+            }
+            if descriptor.revents & Int16(POLLNVAL) != 0 {
+                finish(.failure(POSIXError(.EBADF)))
+                return
+            }
+
+            let readByteCount = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(reader.fileDescriptor, bytes.baseAddress, bytes.count)
+            }
+            if readByteCount == 0 {
+                finish(.success(.init(
+                    isTruncated: false,
+                    maxPendingBytes: maxPendingBytes
+                )))
+                return
+            }
+            if readByteCount < 0 {
+                if errno == EINTR || errno == EAGAIN { continue }
+                finish(.failure(POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)))
+                return
+            }
+
+            let pendingByteCount = Int(readByteCount)
+            maxPendingBytes = max(maxPendingBytes, pendingByteCount)
+            let writableByteCount = min(pendingByteCount, byteLimit - writtenByteCount)
+            do {
+                if writableByteCount > 0 {
+                    try writeAll(buffer, count: writableByteCount)
+                    writtenByteCount += writableByteCount
+                }
+            } catch {
+                controller.requestStop()
+                finish(.failure(error))
+                return
+            }
+            if writableByteCount < pendingByteCount {
+                controller.requestStop()
+                finish(.success(.init(
+                    isTruncated: true,
+                    maxPendingBytes: maxPendingBytes
+                )))
+                return
+            }
+        }
+    }
+
+    private var drainPeriodExpired: Bool {
+        stateLock.withLock {
+            guard let drainDeadline else { return false }
+            return drainDeadline <= .now()
+        }
+    }
+
+    private var pollTimeoutMilliseconds: Int32 {
+        stateLock.withLock {
+            guard let drainDeadline else { return 50 }
+            let now = DispatchTime.now()
+            guard drainDeadline > now else { return 0 }
+            let remainingNanoseconds = drainDeadline.uptimeNanoseconds - now.uptimeNanoseconds
+            let roundedMilliseconds = (remainingNanoseconds + 999_999) / 1_000_000
+            return Int32(min(50, roundedMilliseconds))
+        }
+    }
+
+    private func writeAll(_ buffer: [UInt8], count: Int) throws {
+        try buffer.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < count {
+                let written = Darwin.write(
+                    outputFileDescriptor,
+                    baseAddress.advanced(by: offset),
+                    count - offset
+                )
+                if written > 0 {
+                    offset += written
+                } else if written < 0, errno == EINTR {
+                    continue
                 } else {
-                    self.continuation = continuation
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
             }
         }
     }
 
-    private func consume(_ data: Data) {
-        guard completion == nil else { return }
-        guard !data.isEmpty else {
-            finish(.success(isTruncated))
-            return
+    private func finish(_ result: Result<DiagnosticOutputResult, Error>) {
+        let shouldFinish = stateLock.withLock {
+            guard completion == nil, !isFinishing else { return false }
+            isFinishing = true
+            return true
         }
-        guard !isTruncated else { return }
-
-        let writableByteCount = min(data.count, byteLimit - writtenByteCount)
-        do {
-            if writableByteCount > 0 {
-                try output.write(contentsOf: data.prefix(writableByteCount))
-                writtenByteCount += writableByteCount
-            }
-        } catch {
-            controller.requestStop()
-            finish(.failure(error))
-            return
-        }
-        if writableByteCount < data.count {
-            isTruncated = true
-            controller.requestStop()
-        }
-    }
-
-    private func finish(_ result: Result<Bool, Error>) {
-        guard completion == nil else { return }
-        completion = result
-        reader.readabilityHandler = nil
+        guard shouldFinish else { return }
         try? reader.close()
-        try? output.close()
-        guard let continuation else { return }
-        self.continuation = nil
-        resume(continuation, with: result)
+        Darwin.close(outputFileDescriptor)
+        let continuation = stateLock.withLock {
+            completion = result
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        if let continuation {
+            resume(continuation, with: result)
+        }
     }
 
     private func resume(
-        _ continuation: CheckedContinuation<Bool, Error>,
-        with result: Result<Bool, Error>
+        _ continuation: CheckedContinuation<DiagnosticOutputResult, Error>,
+        with result: Result<DiagnosticOutputResult, Error>
     ) {
         switch result {
         case let .success(value):
@@ -470,6 +596,126 @@ private final class DiagnosticProcessController: @unchecked Sendable {
     }
 }
 
+final class DiagnosticRetentionScheduler: @unchecked Sendable {
+    typealias Schedule = @Sendable (Date, @escaping @Sendable () -> Void) -> Void
+
+    private struct Entry {
+        let token: UUID
+        let deadline: Date
+    }
+
+    private static let logger = Logger(
+        subsystem: "com.napoleon.Napoleon",
+        category: "diagnostic-retention"
+    )
+
+    static let live = DiagnosticRetentionScheduler(
+        now: { Date() },
+        retryDelays: [1, 5, 30],
+        removeItem: { try FileManager.default.removeItem(at: $0) },
+        schedule: { deadline, action in
+            let delay = max(0, deadline.timeIntervalSinceNow)
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + delay,
+                execute: action
+            )
+        },
+        logError: { _ in
+            logger.error("diagnostic_retention_delete_failed")
+        }
+    )
+
+    private let now: @Sendable () -> Date
+    private let retryDelays: [TimeInterval]
+    private let removeItem: @Sendable (URL) throws -> Void
+    private let schedule: Schedule
+    private let logError: @Sendable (String) -> Void
+    private let lock = NSLock()
+    private var entries: [URL: Entry] = [:]
+
+    init(
+        now: @escaping @Sendable () -> Date,
+        retryDelays: [TimeInterval],
+        removeItem: @escaping @Sendable (URL) throws -> Void,
+        schedule: @escaping Schedule,
+        logError: @escaping @Sendable (String) -> Void
+    ) {
+        self.now = now
+        self.retryDelays = retryDelays
+        self.removeItem = removeItem
+        self.schedule = schedule
+        self.logError = logError
+    }
+
+    func scheduleRemoval(_ url: URL, deadline: Date) {
+        guard Self.isManagedArtifact(url) else { return }
+
+        let token: UUID? = lock.withLock {
+            if let current = entries[url], current.deadline <= deadline {
+                return nil
+            }
+            let token = UUID()
+            entries[url] = .init(token: token, deadline: deadline)
+            return token
+        }
+        guard let token else { return }
+        enqueueAttempt(for: url, at: deadline, retryIndex: 0, token: token)
+    }
+
+    private func enqueueAttempt(for url: URL, at deadline: Date, retryIndex: Int, token: UUID) {
+        schedule(deadline) { [self] in
+            attemptRemoval(of: url, retryIndex: retryIndex, token: token)
+        }
+    }
+
+    private func attemptRemoval(of url: URL, retryIndex: Int, token: UUID) {
+        guard isCurrent(url: url, token: token) else { return }
+        do {
+            try removeItem(url)
+            clear(url: url, token: token)
+        } catch {
+            if Self.isFileNotFound(error) {
+                clear(url: url, token: token)
+            } else if retryIndex < retryDelays.count {
+                let delay = max(0, retryDelays[retryIndex])
+                enqueueAttempt(
+                    for: url,
+                    at: now().addingTimeInterval(delay),
+                    retryIndex: retryIndex + 1,
+                    token: token
+                )
+            } else {
+                clear(url: url, token: token)
+                logError("diagnostic_retention_delete_failed")
+            }
+        }
+    }
+
+    private func isCurrent(url: URL, token: UUID) -> Bool {
+        lock.withLock { entries[url]?.token == token }
+    }
+
+    private func clear(url: URL, token: UUID) {
+        lock.withLock {
+            if entries[url]?.token == token {
+                entries.removeValue(forKey: url)
+            }
+        }
+    }
+
+    private static func isManagedArtifact(_ url: URL) -> Bool {
+        let isZIP = url.pathExtension == "zip"
+        let stem = isZIP ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent
+        return UUID(uuidString: stem) != nil
+    }
+
+    private static func isFileNotFound(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError)
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
+    }
+}
+
 struct DiagnosticCommands: Sendable {
     let exportUnifiedLog: @Sendable (URL) async throws -> Void
     let encodePNG: @Sendable (CGImage, URL) throws -> Void
@@ -551,19 +797,10 @@ struct DiagnosticCommands: Sendable {
                 )
             }
         },
-        scheduleRemoval: liveRemovalScheduler
-    )
-
-    private static let liveRemovalScheduler: @Sendable (URL, Date) -> Void = { url, deadline in
-        let isZIP = url.pathExtension == "zip"
-        let stem = isZIP ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent
-        guard UUID(uuidString: stem) != nil else { return }
-
-        let delay = max(0, deadline.timeIntervalSinceNow)
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
-            try? FileManager.default.removeItem(at: url)
+        scheduleRemoval: { url, deadline in
+            DiagnosticRetentionScheduler.live.scheduleRemoval(url, deadline: deadline)
         }
-    }
+    )
 }
 
 enum DiagnosticCommandError: Error {
@@ -1061,9 +1298,14 @@ final class DiagnosticsService: ObservableObject {
         self.now = now
 
         self.searchStore.discard()
-        let cutoff = now().addingTimeInterval(-Self.retentionInterval)
+        let startupDate = now()
+        let scheduleRemoval = commands.scheduleRemoval
         startupCleanup = Task.detached(priority: .utility) {
-            try? Self.removeExpiredReports(in: directory, olderThan: cutoff)
+            try? Self.reconcileReports(
+                in: directory,
+                at: startupDate,
+                scheduleRemoval: scheduleRemoval
+            )
         }
     }
 
@@ -1107,6 +1349,7 @@ final class DiagnosticsService: ObservableObject {
         defer { isPreparingReport = false }
 
         let report = try await prepareReportDirectoryUnlocked()
+        try Task.checkCancellation()
         let zipURL = report.appendingPathExtension("zip")
         commands.scheduleRemoval(zipURL, now().addingTimeInterval(Self.retentionInterval))
         do {
@@ -1135,12 +1378,16 @@ final class DiagnosticsService: ObservableObject {
             : []
 
         await startupCleanup.value
-        let cutoff = generatedAt.addingTimeInterval(-Self.retentionInterval)
+        try Task.checkCancellation()
         let rootDirectory = directory
         let commands = commands
         let now = now
-        let report = try await Task.detached(priority: .utility) {
-            try Self.removeExpiredReports(in: rootDirectory, olderThan: cutoff)
+        let writer = Task.detached(priority: .utility) {
+            try Self.reconcileReports(
+                in: rootDirectory,
+                at: generatedAt,
+                scheduleRemoval: commands.scheduleRemoval
+            )
             return try await Self.writeReport(
                 rootDirectory: rootDirectory,
                 issue: issue,
@@ -1151,7 +1398,12 @@ final class DiagnosticsService: ObservableObject {
                 commands: commands,
                 now: now
             )
-        }.value
+        }
+        let report = try await withTaskCancellationHandler {
+            try await writer.value
+        } onCancel: {
+            writer.cancel()
+        }
         lastWorkingDirectory = report
         return report
     }
@@ -1193,13 +1445,17 @@ final class DiagnosticsService: ObservableObject {
         commands.scheduleRemoval(report, now().addingTimeInterval(retentionInterval))
 
         var errors: [String] = []
+        try Task.checkCancellation()
         do {
             try await commands.exportUnifiedLog(report.appending(path: "unified.log"))
+        } catch is CancellationError {
+            throw CancellationError()
         } catch DiagnosticCommandError.unifiedLogTruncated {
             errors.append("unified_log_truncated")
         } catch {
             errors.append("unified_log_export_failed")
         }
+        try Task.checkCancellation()
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1224,6 +1480,7 @@ final class DiagnosticsService: ObservableObject {
             let thumbnailDirectory = report.appending(path: "thumbnails", directoryHint: .isDirectory)
             try fileManager.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: false)
             for windowID in thumbnails.keys.sorted() {
+                try Task.checkCancellation()
                 guard let image = thumbnails[windowID] else { continue }
                 let imageURL = thumbnailDirectory.appending(path: "\(windowID).png")
                 do {
@@ -1249,13 +1506,22 @@ final class DiagnosticsService: ObservableObject {
         return report
     }
 
-    nonisolated private static func removeExpiredReports(in directory: URL, olderThan cutoff: Date) throws {
+    nonisolated private static func reconcileReports(
+        in directory: URL,
+        at referenceDate: Date,
+        scheduleRemoval: @Sendable (URL, Date) -> Void
+    ) throws {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: directory.path) else { return }
 
         let children = try fileManager.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            includingPropertiesForKeys: [
+                .creationDateKey,
+                .contentModificationDateKey,
+                .isDirectoryKey,
+                .isRegularFileKey
+            ],
             options: [.skipsHiddenFiles]
         )
         for child in children {
@@ -1263,11 +1529,30 @@ final class DiagnosticsService: ObservableObject {
             let stem = isZIP ? child.deletingPathExtension().lastPathComponent : child.lastPathComponent
             guard UUID(uuidString: stem) != nil else { continue }
 
-            let values = try child.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
-            guard isZIP || values.isDirectory == true,
-                  let modificationDate = values.contentModificationDate,
-                  modificationDate < cutoff else { continue }
-            try fileManager.removeItem(at: child)
+            let values = try child.resourceValues(forKeys: [
+                .creationDateKey,
+                .contentModificationDateKey,
+                .isDirectoryKey,
+                .isRegularFileKey
+            ])
+            guard (isZIP && values.isRegularFile == true)
+                    || (!isZIP && values.isDirectory == true) else { continue }
+
+            let originDate = values.creationDate ?? values.contentModificationDate ?? .distantPast
+            let deadline = originDate.addingTimeInterval(retentionInterval)
+            if deadline <= referenceDate {
+                do {
+                    try fileManager.removeItem(at: child)
+                } catch {
+                    let error = error as NSError
+                    if !((error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError)
+                        || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))) {
+                        scheduleRemoval(child, referenceDate)
+                    }
+                }
+            } else {
+                scheduleRemoval(child, deadline)
+            }
         }
     }
 }
