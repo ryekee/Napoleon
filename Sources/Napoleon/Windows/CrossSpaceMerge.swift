@@ -32,13 +32,14 @@ enum CrossSpaceMerge {
     ///   `keepApp(sw.pid) == false` 的窗口整体跳过，不出现在结果里。
     static func crossSpaceAdditions(
         axWindowIDs: Set<WindowID>,
+        suppressedWindowIDs: Set<WindowID> = [],
         screenWindows: [ScreenWindow],
         keepApp: (ProcessID) -> Bool,
         isHiddenApp: (ProcessID) -> Bool,
         pinyin: (String) -> String?,
         isFullscreen: (WindowID) -> Bool
     ) -> [WindowInfo] {
-        var seen = axWindowIDs
+        var seen = axWindowIDs.union(suppressedWindowIDs)
         var additions: [WindowInfo] = []
 
         for screenWindow in screenWindows {

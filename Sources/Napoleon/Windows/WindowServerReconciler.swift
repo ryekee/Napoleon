@@ -116,6 +116,7 @@ enum WindowServerReconciler {
     static func reconcile(
         knownWindows: [WindowInfo],
         onScreen: [OnScreenWindow],
+        suppressedWindowIDs: Set<WindowID> = [],
         appInfo: (ProcessID) -> AppIdentity?,
         pinyin: (String) -> String?
     ) -> Reconciliation {
@@ -126,6 +127,7 @@ enum WindowServerReconciler {
         var recoveredIDs: Set<WindowID> = []
 
         for window in onScreen {
+            guard !suppressedWindowIDs.contains(window.windowID) else { continue }
             guard seen.insert(window.windowID).inserted else { continue }
 
             if var known = knownByID[window.windowID], known.pid == window.pid {
@@ -167,18 +169,21 @@ enum WindowServerReconciler {
     static func applyingPositiveVisibility(
         to windows: [WindowInfo],
         onScreen: [OnScreenWindow],
+        suppressedWindowIDs: Set<WindowID> = [],
         appInfo: (ProcessID) -> AppIdentity?,
         pinyin: (String) -> String?
     ) -> AppliedVisibility {
+        let visibleWindows = windows.filter { !suppressedWindowIDs.contains($0.id) }
         let reconciliation = reconcile(
-            knownWindows: windows,
+            knownWindows: visibleWindows,
             onScreen: onScreen,
+            suppressedWindowIDs: suppressedWindowIDs,
             appInfo: appInfo,
             pinyin: pinyin
         )
         return AppliedVisibility(
             windows: WindowStoreReducer.reduce(
-                WindowState(windows: windows),
+                WindowState(windows: visibleWindows),
                 .reconciled(reconciliation.observedWindows)
             ).windows,
             invalidHandleIDs: reconciliation.recoveredIDs

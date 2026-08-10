@@ -274,6 +274,9 @@ final class AXObserverController {
             guard let windows = windowsRef as? [AXUIElement] else { return }
             for window in windows {
                 registerWindowLevelNotifications(for: window, appState: appState)
+                for child in Self.children(of: window) where Self.role(of: child) == kAXSheetRole {
+                    registerSheetDestruction(for: child, appState: appState)
+                }
             }
         case .cannotComplete where attempt < Self.retryDelays.count:
             let delay = Self.retryDelays[attempt]
@@ -297,6 +300,26 @@ final class AXObserverController {
         }
     }
 
+    private static func children(of element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXChildrenAttribute as CFString,
+            &value
+        ) == .success else { return [] }
+        return value as? [AXUIElement] ?? []
+    }
+
+    private static func role(of element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXRoleAttribute as CFString,
+            &value
+        ) == .success else { return nil }
+        return value as? String
+    }
+
     /// 对单个窗口元素注册全部窗口级通知；用 `registeredWindows` 做去重，避免同一个窗口（比如
     /// `kAXWindowCreatedNotification` 和 start() 时的枚举撞上同一个元素的极端情况）被重复注册。
     private func registerWindowLevelNotifications(for window: AXUIElement, appState: AppObserverState) {
@@ -307,6 +330,13 @@ final class AXObserverController {
         for notification in Self.windowLevelNotifications {
             addNotification(notification, to: window, appState: appState)
         }
+    }
+
+    private func registerSheetDestruction(for sheet: AXUIElement, appState: AppObserverState) {
+        let key = AXUIElementKey(element: sheet)
+        guard !appState.registeredWindows.contains(key) else { return }
+        appState.registeredWindows.insert(key)
+        addNotification(kAXUIElementDestroyedNotification as CFString, to: sheet, appState: appState)
     }
 
     /// `AXObserverAddNotification` 的统一入口，带退避重试：
@@ -356,7 +386,11 @@ final class AXObserverController {
     fileprivate func handle(notificationName: String, element: AXUIElement, appState: AppObserverState) {
         switch notificationName {
         case kAXWindowCreatedNotification:
-            registerWindowLevelNotifications(for: element, appState: appState)
+            if Self.role(of: element) == kAXSheetRole {
+                registerSheetDestruction(for: element, appState: appState)
+            } else {
+                registerWindowLevelNotifications(for: element, appState: appState)
+            }
             onNotification?(.windowCreated(pid: appState.pid, element: element))
         case kAXUIElementDestroyedNotification:
             appState.registeredWindows.remove(AXUIElementKey(element: element))

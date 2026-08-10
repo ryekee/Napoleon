@@ -97,13 +97,25 @@ final class WindowEnumerator: Sendable {
     struct EnumerationResult: @unchecked Sendable {
         let windows: [WindowInfo]
         let handles: [WindowID: AXUIElement]
+        let suppressedWindows: [SuppressedWindow]
+        let suppressionIncompletePIDs: Set<ProcessID>
         let windowLayerSnapshot: WindowLayerSnapshot?
         let failedApplications: [ApplicationFailure]
     }
 
+    struct SuppressedWindow: @unchecked Sendable {
+        let id: WindowID
+        let pid: ProcessID
+        let ownerID: WindowID
+        let element: AXUIElement
+    }
+
     struct AppEnumerationResult: @unchecked Sendable {
+        let pid: ProcessID
         let windows: [WindowInfo]
         let handles: [WindowID: AXUIElement]
+        let suppressedWindows: [SuppressedWindow]
+        let suppressionIsComplete: Bool
         let failure: ApplicationFailure?
     }
 
@@ -114,6 +126,9 @@ final class WindowEnumerator: Sendable {
         let switchableWindowIDs = windowLayerSnapshot?.switchableWindowIDs
         var windows: [WindowInfo] = []
         var handles: [WindowID: AXUIElement] = [:]
+        var suppressedWindows: [SuppressedWindow] = []
+        var suppressedIDs: Set<WindowID> = []
+        var suppressionIncompletePIDs: Set<ProcessID> = []
         var failedApplications: [ApplicationFailure] = []
 
         for result in appResults {
@@ -126,11 +141,19 @@ final class WindowEnumerator: Sendable {
                     handles[window.id] = handle
                 }
             }
+            for window in result.suppressedWindows where suppressedIDs.insert(window.id).inserted {
+                suppressedWindows.append(window)
+            }
+            if !result.suppressionIsComplete {
+                suppressionIncompletePIDs.insert(result.pid)
+            }
         }
 
         return EnumerationResult(
             windows: windows,
             handles: handles,
+            suppressedWindows: suppressedWindows,
+            suppressionIncompletePIDs: suppressionIncompletePIDs,
             windowLayerSnapshot: windowLayerSnapshot,
             failedApplications: failedApplications
         )
@@ -177,8 +200,11 @@ final class WindowEnumerator: Sendable {
         let error = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
         guard error == .success, let axWindows = windowsRef as? [AXUIElement] else {
             return AppEnumerationResult(
+                pid: app.pid,
                 windows: [],
                 handles: [:],
+                suppressedWindows: [],
+                suppressionIsComplete: false,
                 failure: ApplicationFailure(
                     pid: app.pid,
                     appName: app.appName,
@@ -189,8 +215,15 @@ final class WindowEnumerator: Sendable {
 
         var windows: [WindowInfo] = []
         var handles: [WindowID: AXUIElement] = [:]
+        var suppressedWindows: [SuppressedWindow] = []
+        var suppressionIsComplete = true
 
         for element in axWindows {
+            if let sheets = attachedSheets(of: element, pid: app.pid) {
+                suppressedWindows.append(contentsOf: sheets)
+            } else {
+                suppressionIsComplete = false
+            }
             guard let result = windowInfo(
                 for: element,
                 pid: app.pid,
@@ -205,7 +238,38 @@ final class WindowEnumerator: Sendable {
             handles[result.id] = result.element
         }
 
-        return AppEnumerationResult(windows: windows, handles: handles, failure: nil)
+        return AppEnumerationResult(
+            pid: app.pid,
+            windows: windows,
+            handles: handles,
+            suppressedWindows: suppressedWindows,
+            suppressionIsComplete: suppressionIsComplete,
+            failure: nil
+        )
+    }
+
+    /// Sheet 是父窗口的一部分，不是独立切换目标；Window Server/SCK 却会为它分配单独 ID。
+    func suppressedWindow(for element: AXUIElement, pid: ProcessID) -> SuppressedWindow? {
+        guard Self.stringAttribute(element, kAXRoleAttribute) == kAXSheetRole,
+              let id = resolver.windowID(for: element),
+              let owner = Self.elementAttribute(element, kAXWindowAttribute),
+              let ownerID = resolver.windowID(for: owner)
+        else { return nil }
+        return SuppressedWindow(id: id, pid: pid, ownerID: ownerID, element: element)
+    }
+
+    private func attachedSheets(of window: AXUIElement, pid: ProcessID) -> [SuppressedWindow]? {
+        guard let children = Self.elementsAttribute(window, kAXChildrenAttribute) else { return nil }
+        var sheets: [SuppressedWindow] = []
+        for child in children {
+            guard let role = Self.stringAttribute(child, kAXRoleAttribute) else { return nil }
+            guard role == kAXSheetRole else { continue }
+            guard let id = resolver.windowID(for: child),
+                  let ownerID = resolver.windowID(for: window)
+            else { return nil }
+            sheets.append(SuppressedWindow(id: id, pid: pid, ownerID: ownerID, element: child))
+        }
+        return sheets
     }
 
     /// 单个窗口 AXUIElement → `WindowInfo` + 句柄。任一必要条件不满足（subrole 不对、
@@ -300,6 +364,20 @@ final class WindowEnumerator: Sendable {
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard error == .success else { return false }
         return (value as? Bool) ?? false
+    }
+
+    private static func elementsAttribute(_ element: AXUIElement, _ attribute: String) -> [AXUIElement]? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard error == .success else { return nil }
+        return value as? [AXUIElement] ?? []
+    }
+
+    private static func elementAttribute(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard error == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement) // swiftlint:disable:this force_cast -- CFGetTypeID 已确认类型
     }
 
     private static func isZeroSize(_ element: AXUIElement) -> Bool {

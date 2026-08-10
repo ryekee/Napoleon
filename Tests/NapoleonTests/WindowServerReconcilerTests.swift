@@ -219,6 +219,22 @@ import Testing
         #expect(result.changed == false)
     }
 
+    @Test func attachedSheetWindowIDIsNotRecoveredAsAnIndependentWindow() {
+        let owner = WindowInfo(id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Owner")
+        let sheet = WindowInfo(id: 9, pid: 100, appName: "App", appBundleID: nil, title: "")
+
+        let result = WindowServerReconciler.applyingPositiveVisibility(
+            to: [owner, sheet],
+            onScreen: [onScreen(1), onScreen(9)],
+            suppressedWindowIDs: [9],
+            appInfo: anyApp,
+            pinyin: noPinyin
+        )
+
+        #expect(result.windows.map(\.id) == [1])
+        #expect(result.invalidHandleIDs.isEmpty)
+    }
+
     @Test func fullRefreshAppliesPositiveVisibilityWithoutDroppingUnobservedWindows() {
         let stale = WindowInfo(
             id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Visible",

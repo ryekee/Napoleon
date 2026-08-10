@@ -116,6 +116,9 @@ final class WindowStore {
     private var handles: [WindowID: AXUIElement] = [:]
     /// 反向：AXUIElement → WindowID，供把 AX 通知的 element 映回 WindowID。
     private var reverse: [AXElementKey: WindowID] = [:]
+    private var suppressedReverse: [AXElementKey: WindowID] = [:]
+    /// Attached sheet 有独立 CGWindowID，但切换目标是它的父窗口；同时用于阻止 CG/SC 回填和归一化焦点。
+    private var suppressedWindows: [WindowID: (pid: ProcessID, ownerID: WindowID, element: AXUIElement)] = [:]
 
     /// Task 16：上一次被 `reduceFocusChange(to:)` reduce 为聚焦窗口的 id——用来判断「这次
     /// 焦点变化是不是真的换了一扇窗口」，以及要预热哪一扇（刚失焦的那扇，也就是这个旧值）。
@@ -332,6 +335,8 @@ final class WindowStore {
 
         handles.removeAll()
         reverse.removeAll()
+        suppressedReverse.removeAll()
+        suppressedWindows.removeAll()
     }
 
     /// 仅主线程调用，O(1) 读当前热态 + 句柄映射（Controller 触发选择器时用）。`WindowState`
@@ -369,6 +374,7 @@ final class WindowStore {
         let reconciliation = WindowServerReconciler.reconcile(
             knownWindows: state.windows,
             onScreen: onScreen,
+            suppressedWindowIDs: Set(suppressedWindows.keys),
             appInfo: { pid in
                 guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
                     return nil
@@ -577,12 +583,29 @@ final class WindowStore {
         let (axResult, content) = await (axTask, contentTask)
         let windows = axResult.windows
         let newHandles = axResult.handles
+        var refreshedSuppressed = Dictionary(
+            uniqueKeysWithValues: axResult.suppressedWindows.map {
+                ($0.id, (pid: $0.pid, ownerID: $0.ownerID, element: $0.element))
+            }
+        )
+        for (id, value) in suppressedWindows where axResult.suppressionIncompletePIDs.contains(value.pid) {
+            refreshedSuppressed[id] = value
+        }
+        if gen != stateGeneration {
+            for (id, value) in suppressedWindows where !journaledRemovedIDs.contains(id) {
+                refreshedSuppressed[id] = value
+            }
+        }
+        for id in journaledRemovedIDs {
+            refreshedSuppressed.removeValue(forKey: id)
+        }
         // R1：`screenLister.windows(from:)` 是纯同步过滤，不再自己发起 XPC——`content` 就是
         // 上面 `contentTask` 刚抓到的那一份（抓取失败/未授权时是 `nil`，过滤结果自然是 `[]`，
         // 跟旧 `screenLister.list()` 失败时返回 `[]` 的降级语义一致）。
         let screenWindows = content.map { screenLister.windows(from: $0) } ?? []
 
         if !isStopped {
+            suppressedWindows = refreshedSuppressed
             if let content {
                 // R1：把这次刷新统一抓到的同一份 `content` 喂给 `ThumbnailService`，让它的
                 // id→SCWindow 映射跟主窗口列表同步刷新——不再是永远停留在 `warmUp()` 那一刻
@@ -719,6 +742,7 @@ final class WindowStore {
     private func crossSpaceAdditions(axWindows: [WindowInfo], screenWindows: [ScreenWindow]) -> [WindowInfo] {
         CrossSpaceMerge.crossSpaceAdditions(
             axWindowIDs: Set(axWindows.map(\.id)),
+            suppressedWindowIDs: Set(suppressedWindows.keys),
             screenWindows: screenWindows,
             keepApp: NSRunningApplication.isRegularOrSelf(pid:),   // 与枚举侧同口径，含 Napoleon 自己
             isHiddenApp: { NSRunningApplication(processIdentifier: $0)?.isHidden ?? false },
@@ -797,6 +821,7 @@ final class WindowStore {
             let appliedVisibility = WindowServerReconciler.applyingPositiveVisibility(
                 to: windows,
                 onScreen: windowLayerSnapshot.onScreenWindows,
+                suppressedWindowIDs: Set(suppressedWindows.keys),
                 appInfo: { pid in
                     guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
                         return nil
@@ -826,6 +851,9 @@ final class WindowStore {
         handles = validHandles
         reverse = Dictionary(
             uniqueKeysWithValues: validHandles.map { id, element in (AXElementKey(element: element), id) }
+        )
+        suppressedReverse = Dictionary(
+            uniqueKeysWithValues: suppressedWindows.map { id, window in (AXElementKey(element: window.element), id) }
         )
     }
 
@@ -970,6 +998,21 @@ final class WindowStore {
     private func handleWindowCreated(pid: ProcessID, element: AXUIElement) {
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else { return }
 
+        if let suppressed = enumerator.suppressedWindow(for: element, pid: pid) {
+            suppressedWindows[suppressed.id] = (
+                pid: pid,
+                ownerID: suppressed.ownerID,
+                element: suppressed.element
+            )
+            if let oldElement = handles.removeValue(forKey: suppressed.id) {
+                reverse.removeValue(forKey: AXElementKey(element: oldElement))
+            }
+            suppressedReverse[AXElementKey(element: suppressed.element)] = suppressed.id
+            stateGeneration += 1
+            state = WindowStoreReducer.reduce(state, .destroyed(suppressed.id))
+            return
+        }
+
         guard let result = enumerator.windowInfo(
             for: element,
             pid: pid,
@@ -986,6 +1029,12 @@ final class WindowStore {
 
     private func handleWindowDestroyed(element: AXUIElement) {
         let key = AXElementKey(element: element)
+        if let id = suppressedReverse.removeValue(forKey: key) {
+            suppressedWindows.removeValue(forKey: id)
+            stateGeneration += 1
+            if refreshInFlight { journaledRemovedIDs.insert(id) }
+            return
+        }
         guard let id = reverse[key] else { return }
 
         stateGeneration += 1
@@ -1020,6 +1069,7 @@ final class WindowStore {
         // 先在 reduce 之前从当前（尚未剔除该 pid 之前的）state 里读出它名下所有窗口的 id——
         // reduce 之后 state.windows 里就没有这些条目了，没法再反查。
         let terminatedIDs = state.windows.filter { $0.pid == pid }.map(\.id)
+        let suppressedIDs = suppressedWindows.compactMap { $0.value.pid == pid ? $0.key : nil }
         stateGeneration += 1
         state = WindowStoreReducer.reduce(state, .appTerminated(pid))
 
@@ -1028,12 +1078,18 @@ final class WindowStore {
                 reverse.removeValue(forKey: AXElementKey(element: element))
             }
         }
+        for id in suppressedIDs {
+            if let window = suppressedWindows.removeValue(forKey: id) {
+                suppressedReverse.removeValue(forKey: AXElementKey(element: window.element))
+            }
+        }
 
         // R3：同 `handleWindowDestroyed`——整个 App 退出期间摘掉的这批窗口，如果发生在一次
         // `refreshNow()` 飞行途中，全部记进 `journaledRemovedIDs`，防止被那次飞行拍到的旧
         // 快照复活。
         if refreshInFlight {
             journaledRemovedIDs.formUnion(terminatedIDs)
+            journaledRemovedIDs.formUnion(suppressedIDs)
         }
     }
 
@@ -1081,7 +1137,8 @@ final class WindowStore {
     /// id 跟 `SCShareableContent` 枚举同一扇窗口时报告的 id 是同一个数值空间（都是系统级
     /// `CGWindowID`），所以不管这扇窗口在 `state.windows` 里是作为「当前 Space」条目
     /// （`handleWindowCreated` 加的）还是「跨 Space」条目（`CrossSpaceMerge` 加的）存在，都能
-    /// 命中。解析成功且该 id 确实在 `state.windows` 里（`WindowStoreReducer` 的 `.focused`
+    /// 命中。解析成功后先把 attached sheet 的 id 归一化为 owner id，再确认它在 `state.windows`
+    /// 里（`WindowStoreReducer` 的 `.focused`
     /// 分支本身也会做这个存在性检查，这里提前 guard 只是为了在缺失时能继续走到下面的兜底，而
     /// 不是直接吞掉）才 reduce；否则落到下面的 pid 兜底。
     ///
@@ -1110,7 +1167,12 @@ final class WindowStore {
             CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
         {
             let element = focusedRef as! AXUIElement // swiftlint:disable:this force_cast -- CFGetTypeID 已确认类型
-            if let id = resolver.windowID(for: element), state.windows.contains(where: { $0.id == id }) {
+            if let resolvedID = resolver.windowID(for: element),
+               let id = Self.canonicalFocusID(
+                   resolvedID: resolvedID,
+                   knownWindowIDs: Set(state.windows.map(\.id)),
+                   suppressedOwnerIDs: suppressedWindows.mapValues(\.ownerID)
+               ) {
                 reduceFocusChange(to: id)
                 return
             }
@@ -1156,7 +1218,24 @@ final class WindowStore {
     // MARK: - Handle map lookup
 
     private func windowID(for element: AXUIElement) -> WindowID? {
-        reverse[AXElementKey(element: element)]
+        let key = AXElementKey(element: element)
+        if let id = reverse[key] { return id }
+        guard let sheetID = suppressedReverse[key] else { return nil }
+        return Self.canonicalFocusID(
+            resolvedID: sheetID,
+            knownWindowIDs: Set(state.windows.map(\.id)),
+            suppressedOwnerIDs: suppressedWindows.mapValues(\.ownerID)
+        )
+    }
+
+    nonisolated static func canonicalFocusID(
+        resolvedID: WindowID,
+        knownWindowIDs: Set<WindowID>,
+        suppressedOwnerIDs: [WindowID: WindowID]
+    ) -> WindowID? {
+        if knownWindowIDs.contains(resolvedID) { return resolvedID }
+        guard let ownerID = suppressedOwnerIDs[resolvedID], knownWindowIDs.contains(ownerID) else { return nil }
+        return ownerID
     }
 
     // MARK: - AX attribute read (single-attribute, for already-known windows)
