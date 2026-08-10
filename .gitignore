@@ -9,6 +9,7 @@ xcuserdata/
 /Napoleon.app
 .superpowers/
 .worktrees/
+.codex/
 # 不公开的本地资产与开发过程产物：仍然留在工作区，只是不入库。
 # design   —— 图标设计稿（成品已在 Resources/Assets.xcassets）
 # docs     —— spec/plan/spike 报告、测试矩阵等开发过程文档
