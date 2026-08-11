@@ -153,6 +153,12 @@ final class SpaceClassifier {
         return spaces.contains { fullscreenSpaceIDs.contains($0) }
     }
 
+    /// ScreenCaptureKit 也会返回未选中的原生标签页；这类窗口没有所属 Space。
+    /// `nil` 表示私有查询不可用，调用方应 fail-open，避免误删真实窗口。
+    func isAssignedToSpace(_ windowID: WindowID) -> Bool? {
+        spaceIDs(for: windowID).map { !$0.isEmpty }
+    }
+
     /// 全屏逃生：`windowID` 是否位于给定集合里的**任一** Space（把全屏浮层里的桌面窗口收窄到
     /// 用户逃生要回去的那些桌面 `lastDesktopSpaceIDs`）。私有符号缺失/查询失败一律 `false`——
     /// 宁可少显一扇也不误显别的桌面的窗口；调用方 `escapeAwareAdditions` 对「整片查询失效导致

@@ -37,7 +37,8 @@ enum CrossSpaceMerge {
         keepApp: (ProcessID) -> Bool,
         isHiddenApp: (ProcessID) -> Bool,
         pinyin: (String) -> String?,
-        isFullscreen: (WindowID) -> Bool
+        isFullscreen: (WindowID) -> Bool,
+        isAssignedToSpace: (WindowID) -> Bool? = { _ in true }
     ) -> [WindowInfo] {
         var seen = axWindowIDs.union(suppressedWindowIDs)
         var additions: [WindowInfo] = []
@@ -45,6 +46,7 @@ enum CrossSpaceMerge {
         for screenWindow in screenWindows {
             guard !seen.contains(screenWindow.windowID) else { continue }
             guard keepApp(screenWindow.pid) else { continue }
+            guard isAssignedToSpace(screenWindow.windowID) != false else { continue }
             seen.insert(screenWindow.windowID)
 
             additions.append(WindowInfo(

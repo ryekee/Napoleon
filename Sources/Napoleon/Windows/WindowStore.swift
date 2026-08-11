@@ -747,7 +747,8 @@ final class WindowStore {
             keepApp: NSRunningApplication.isRegularOrSelf(pid:),   // 与枚举侧同口径，含 Napoleon 自己
             isHiddenApp: { NSRunningApplication(processIdentifier: $0)?.isHidden ?? false },
             pinyin: PinyinTransformer.pinyin,
-            isFullscreen: spaceClassifier.isOnFullscreenSpace
+            isFullscreen: spaceClassifier.isOnFullscreenSpace,
+            isAssignedToSpace: spaceClassifier.isAssignedToSpace
         )
     }
 

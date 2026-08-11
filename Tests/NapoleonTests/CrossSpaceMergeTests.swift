@@ -117,6 +117,20 @@ import NapoleonCore
         #expect(additions.map(\.id) == [10])
     }
 
+    @Test func skipsScreenCaptureWindowsThatAreNotAssignedToAnySpace() {
+        let additions = CrossSpaceMerge.crossSpaceAdditions(
+            axWindowIDs: [1],
+            screenWindows: [Self.screenWindow(id: 1), Self.screenWindow(id: 2)],
+            keepApp: { _ in true },
+            isHiddenApp: { _ in false },
+            pinyin: { _ in nil },
+            isFullscreen: { _ in false },
+            isAssignedToSpace: { $0 == 1 }
+        )
+
+        #expect(additions.isEmpty)
+    }
+
     // MARK: - O1/Y1: keepApp filter (accessory/non-regular/dead-app pids are skipped)
 
     @Test func skipsWindowsWhoseOwningAppIsNotKeptByKeepApp() {
