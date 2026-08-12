@@ -999,7 +999,11 @@ final class WindowStore {
     private func handleWindowCreated(pid: ProcessID, element: AXUIElement) {
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else { return }
 
-        if let suppressed = enumerator.suppressedWindow(for: element, pid: pid) {
+        if let suppressed = enumerator.suppressedWindow(
+            for: element,
+            pid: pid,
+            ownerCandidateIDs: state.windows.filter { $0.pid == pid && handles[$0.id] != nil }.map(\.id)
+        ) {
             suppressedWindows[suppressed.id] = (
                 pid: pid,
                 ownerID: suppressed.ownerID,

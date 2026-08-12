@@ -131,3 +131,25 @@ import Testing
         #expect(target == 1)
     }
 }
+
+@Suite struct ModalDialogSuppressionTests {
+    @Test func modalDialogUsesTheSoleExistingWindowAsItsOwner() {
+        let ownerID = WindowEnumerator.modalDialogOwnerID(
+            subrole: kAXDialogSubrole,
+            isModal: true,
+            ownerCandidateIDs: [112]
+        )
+
+        #expect(ownerID == 112)
+    }
+
+    @Test func ambiguousModalDialogIsNotSuppressed() {
+        let ownerID = WindowEnumerator.modalDialogOwnerID(
+            subrole: kAXDialogSubrole,
+            isModal: true,
+            ownerCandidateIDs: [112, 113]
+        )
+
+        #expect(ownerID == nil)
+    }
+}

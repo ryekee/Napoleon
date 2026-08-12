@@ -140,6 +140,9 @@ enum WindowServerReconciler {
                 continue
             }
 
+            // CGWindowList 会暴露 Chrome 等 App 的无标题辅助 surface（例如 444×22 的底部条）。
+            // 已知 AX 窗口仍可走上面的可见性纠正；只有“凭 CG 数据新建窗口”需要这层保守过滤。
+            guard !window.title.isEmpty, window.bounds.width >= 50, window.bounds.height >= 50 else { continue }
             guard let identity = appInfo(window.pid) else { continue }
             observed.append(WindowInfo(
                 id: window.windowID,
@@ -214,6 +217,7 @@ enum WindowServerReconciler {
 
         for window in onScreen {
             guard !seen.contains(window.windowID) else { continue }
+            guard !window.title.isEmpty, window.bounds.width >= 50, window.bounds.height >= 50 else { continue }
             guard let identity = appInfo(window.pid) else { continue }
             seen.insert(window.windowID)
 

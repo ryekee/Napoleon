@@ -217,8 +217,20 @@ final class WindowEnumerator: Sendable {
         var handles: [WindowID: AXUIElement] = [:]
         var suppressedWindows: [SuppressedWindow] = []
         var suppressionIsComplete = true
+        let standardWindowIDs = axWindows.compactMap { element -> WindowID? in
+            guard Self.stringAttribute(element, kAXSubroleAttribute) == kAXStandardWindowSubrole else { return nil }
+            return resolver.windowID(for: element)
+        }
 
         for element in axWindows {
+            if let suppressed = suppressedWindow(
+                for: element,
+                pid: app.pid,
+                ownerCandidateIDs: standardWindowIDs
+            ) {
+                suppressedWindows.append(suppressed)
+                continue
+            }
             if let sheets = attachedSheets(of: element, pid: app.pid) {
                 suppressedWindows.append(contentsOf: sheets)
             } else {
@@ -249,13 +261,37 @@ final class WindowEnumerator: Sendable {
     }
 
     /// Sheet 是父窗口的一部分，不是独立切换目标；Window Server/SCK 却会为它分配单独 ID。
-    func suppressedWindow(for element: AXUIElement, pid: ProcessID) -> SuppressedWindow? {
-        guard Self.stringAttribute(element, kAXRoleAttribute) == kAXSheetRole,
-              let id = resolver.windowID(for: element),
-              let owner = Self.elementAttribute(element, kAXWindowAttribute),
-              let ownerID = resolver.windowID(for: owner)
+    func suppressedWindow(
+        for element: AXUIElement,
+        pid: ProcessID,
+        ownerCandidateIDs: [WindowID] = []
+    ) -> SuppressedWindow? {
+        if Self.stringAttribute(element, kAXRoleAttribute) == kAXSheetRole,
+           let id = resolver.windowID(for: element),
+           let owner = Self.elementAttribute(element, kAXWindowAttribute),
+           let ownerID = resolver.windowID(for: owner) {
+            return SuppressedWindow(id: id, pid: pid, ownerID: ownerID, element: element)
+        }
+
+        guard let id = resolver.windowID(for: element),
+              let ownerID = Self.modalDialogOwnerID(
+                  subrole: Self.stringAttribute(element, kAXSubroleAttribute),
+                  isModal: Self.boolAttribute(element, kAXModalAttribute),
+                  ownerCandidateIDs: ownerCandidateIDs
+              )
         else { return nil }
         return SuppressedWindow(id: id, pid: pid, ownerID: ownerID, element: element)
+    }
+
+    static func modalDialogOwnerID(
+        subrole: String?,
+        isModal: Bool,
+        ownerCandidateIDs: [WindowID]
+    ) -> WindowID? {
+        guard subrole == kAXDialogSubrole, isModal else { return nil }
+        let candidates = Set(ownerCandidateIDs)
+        guard candidates.count == 1 else { return nil }
+        return candidates.first
     }
 
     private func attachedSheets(of window: AXUIElement, pid: ProcessID) -> [SuppressedWindow]? {

@@ -219,6 +219,25 @@ import Testing
         #expect(result.changed == false)
     }
 
+    @Test func doesNotRecoverUnknownUntitledAuxiliarySurface() {
+        let auxiliary = OnScreenWindow(
+            windowID: 28_970,
+            pid: 100,
+            title: "",
+            bounds: CGRect(x: 15, y: 1214, width: 444, height: 22)
+        )
+
+        let result = WindowServerReconciler.reconcile(
+            knownWindows: [],
+            onScreen: [auxiliary],
+            appInfo: anyApp,
+            pinyin: noPinyin
+        )
+
+        #expect(result.recoveredIDs.isEmpty)
+        #expect(result.observedWindows.isEmpty)
+    }
+
     @Test func attachedSheetWindowIDIsNotRecoveredAsAnIndependentWindow() {
         let owner = WindowInfo(id: 1, pid: 100, appName: "App", appBundleID: nil, title: "Owner")
         let sheet = WindowInfo(id: 9, pid: 100, appName: "App", appBundleID: nil, title: "")
