@@ -16,7 +16,7 @@ public struct WindowInfo: Identifiable, Equatable, Sendable {
     public var pinyinTitle: String?
     /// Task X4：该窗口是否位于一个全屏 Space（type==4，见 `SpaceClassifier`）。默认 `false`——
     /// AX 枚举的当前 Space 窗口不关心这个字段（它们本来就靠 `isOnCurrentSpace` 保证可见）；
-    /// 只有 `CrossSpaceMerge` 追加的跨 Space 窗口才会用 `SpaceClassifier` 的分类结果覆盖它。
+    /// Registry 已知的跨 Space 窗口会用 `SpaceClassifier` 的分类结果覆盖它。
     /// `searchHaystack` 不含它——纯展示/过滤用途，不参与搜索匹配。
     public var isFullscreen: Bool
 

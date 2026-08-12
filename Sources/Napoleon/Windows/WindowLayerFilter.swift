@@ -3,8 +3,25 @@ import Foundation
 import NapoleonCore
 
 struct WindowLayerSnapshot: Equatable, Sendable {
-    let switchableWindowIDs: Set<WindowID>
-    let onScreenWindows: [OnScreenWindow]
+    let switchableWindows: [WindowID: ProcessID]
+    let nonSwitchableWindows: [WindowID: ProcessID]
+    let onScreenWindowIDs: Set<WindowID>
+
+    init(
+        switchableWindows: [WindowID: ProcessID],
+        nonSwitchableWindows: [WindowID: ProcessID] = [:],
+        onScreenWindowIDs: Set<WindowID>
+    ) {
+        self.switchableWindows = switchableWindows
+        self.nonSwitchableWindows = nonSwitchableWindows
+        self.onScreenWindowIDs = onScreenWindowIDs
+    }
+
+    /// AX 是语义来源；只有同一身份被 Window Server 明确标成非标准 layer 时才排除。
+    func permitsSemanticWindow(id: WindowID, pid: ProcessID) -> Bool {
+        if switchableWindows[id] == pid { return true }
+        return nonSwitchableWindows[id] != pid
+    }
 }
 
 /// 用窗口服务器的 layer 排除浮动工具窗、HUD、Pet 等辅助窗口。
@@ -24,36 +41,44 @@ enum WindowLayerFilter {
         return snapshot(from: raw)
     }
 
-    /// 获取当前全部 layer 0 窗口 ID。读取失败时返回 nil，调用方应 fail-open，避免窗口服务器
-    /// 短暂异常导致整个切换器变空。
-    static func currentSwitchableWindowIDs() -> Set<WindowID>? {
-        currentSnapshot()?.switchableWindowIDs
-    }
-
     /// 纯解析入口：`kCGWindowIsOnscreen == true` 才算正向证据；缺键和 false 都不做反向推断。
     static func snapshot(from raw: [[String: Any]]) -> WindowLayerSnapshot? {
-        let ids = switchableWindowIDs(from: raw)
+        let windows = switchableWindows(from: raw)
         // 空快照更可能是窗口服务器处于切换/锁屏等短暂状态；fail-open 比把整个 switcher 清空安全。
-        guard !ids.isEmpty else { return nil }
+        guard !windows.isEmpty else { return nil }
 
-        let onScreenRaw = raw.filter {
-            ($0[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true
-        }
+        let onScreenIDs = Set(raw.compactMap { entry -> WindowID? in
+            guard (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true else { return nil }
+            guard let id = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  windows[id] == pid else { return nil }
+            return id
+        })
         return WindowLayerSnapshot(
-            switchableWindowIDs: ids,
-            onScreenWindows: WindowServerReconciler.realAppWindows(from: onScreenRaw)
+            switchableWindows: windows,
+            nonSwitchableWindows: windowOwners(from: raw, whereLayerIsZero: false),
+            onScreenWindowIDs: onScreenIDs
         )
     }
 
-    /// 纯逻辑入口，供单测覆盖。只认 layer 0；缺少 layer 或 window id 的条目不是可切换窗口。
-    static func switchableWindowIDs(from raw: [[String: Any]]) -> Set<WindowID> {
-        Set(raw.compactMap { entry -> WindowID? in
-            guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-                  let id = entry[kCGWindowNumber as String] as? NSNumber
-            else {
-                return nil
-            }
-            return id.uint32Value
-        })
+    static func switchableWindows(from raw: [[String: Any]]) -> [WindowID: ProcessID] {
+        windowOwners(from: raw, whereLayerIsZero: true)
+    }
+
+    private static func windowOwners(
+        from raw: [[String: Any]],
+        whereLayerIsZero: Bool
+    ) -> [WindowID: ProcessID] {
+        Dictionary(
+            raw.compactMap { entry -> (WindowID, ProcessID)? in
+                guard let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                      (layer == 0) == whereLayerIsZero,
+                      let id = entry[kCGWindowNumber as String] as? NSNumber,
+                      let pid = entry[kCGWindowOwnerPID as String] as? NSNumber
+                else { return nil }
+                return (id.uint32Value, pid.int32Value)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 }

@@ -390,10 +390,12 @@ final class SwitcherController: HotkeyManagerDelegate {
 
         if let element = handles[target.id] {
             let ok = WindowFocuser.focus(windowID: target.id, element: element, pid: target.pid)
+            if ok { windowStore.recordCommittedFocus(target.id) }
             Self.logger.info("commitFocus: focus(AX) \(target.appName, privacy: .public) ok=\(ok, privacy: .public)")
         } else {
             // 跨 Space/无句柄——已知 v1 局限：多窗口 App 只能到 App 级，不保证精准聚焦那一扇窗口。
             let ok = WindowFocuser.focusApp(pid: target.pid)
+            if ok { windowStore.recordCommittedActivation(pid: target.pid) }
             Self.logger.info("commitFocus: focusApp(cross-space) \(target.appName, privacy: .public) ok=\(ok, privacy: .public)")
         }
     }

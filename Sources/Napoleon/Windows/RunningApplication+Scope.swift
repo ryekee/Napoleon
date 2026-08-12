@@ -17,18 +17,12 @@ extension NSRunningApplication {
     /// 规则），切换器的核心功能会整个失效——这正是修过一次的那个严重回归。所以身份留在
     /// `.accessory`，靠这条判据显式开一个口子。
     ///
-    /// **为什么必须是共用的一条**：这个判据散落在四个地方——窗口枚举
+    /// **为什么必须是共用的一条**：这个判据用于三条入口——窗口枚举
     /// （`WindowEnumerator.snapshotRunningApplications`）、AX 观察者注册与 App 启动
-    /// （`AXObserverController`）、前台切换记 MRU（`WindowStore.handleAppActivated`）、跨 Space
-    /// 合并（`WindowStore.crossSpaceAdditions`）。之前只有枚举放开了自身、其余三处没有，直接
-    /// 后果是：设置窗口进得了列表，却收不到自己的窗口生命周期通知（最小化/改标题都不会更新），
-    /// 从切换器切回它时也记不进 MRU。四处必须同口径，所以收敛到这里。
+    /// （`AXObserverController`）、前台切换记 MRU（`WindowStore.handleAppActivated`）。这些入口
+    /// 口径不一致会导致设置窗口进得了列表，却收不到自己的窗口生命周期通知（最小化/改标题都不会
+    /// 更新），从切换器切回它时也记不进 MRU，所以收敛到这里。
     var isRegularOrSelf: Bool {
         activationPolicy == .regular || processIdentifier == Self.ownProcessID
-    }
-
-    /// 只有 pid 时的同一判据（跨 Space 合并那条路只拿得到 pid）。进程已退出时返回 `false`。
-    static func isRegularOrSelf(pid: ProcessID) -> Bool {
-        pid == ownProcessID || NSRunningApplication(processIdentifier: pid)?.activationPolicy == .regular
     }
 }

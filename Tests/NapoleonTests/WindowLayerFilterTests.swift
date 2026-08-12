@@ -26,17 +26,11 @@ import Testing
 
     @Test func keepsStandardLayerAndDropsFloatingPetWindow() {
         let raw: [[String: Any]] = [
-            [
-                kCGWindowNumber as String: NSNumber(value: 73),
-                kCGWindowLayer as String: NSNumber(value: 0)
-            ],
-            [
-                kCGWindowNumber as String: NSNumber(value: 226),
-                kCGWindowLayer as String: NSNumber(value: 3)
-            ]
+            entry(id: 73),
+            entry(id: 226, layer: 3)
         ]
 
-        #expect(WindowLayerFilter.switchableWindowIDs(from: raw) == [73])
+        #expect(WindowLayerFilter.switchableWindows(from: raw) == [73: 100])
     }
 
     @Test func malformedEntriesFailClosedIndividually() {
@@ -44,7 +38,7 @@ import Testing
             [kCGWindowNumber as String: NSNumber(value: 1)],
             [kCGWindowLayer as String: NSNumber(value: 0)]
         ]
-        #expect(WindowLayerFilter.switchableWindowIDs(from: raw).isEmpty)
+        #expect(WindowLayerFilter.switchableWindows(from: raw).isEmpty)
     }
 
     @Test func oneSnapshotSeparatesSwitchableAndPositivelyOnScreenWindows() throws {
@@ -54,15 +48,20 @@ import Testing
             entry(id: 226, layer: 3, onScreen: true)
         ]))
 
-        #expect(snapshot.switchableWindowIDs == [73, 74])
-        #expect(snapshot.onScreenWindows.map(\.windowID) == [73])
+        #expect(snapshot.switchableWindows == [73: 100, 74: 100])
+        #expect(snapshot.nonSwitchableWindows == [226: 100])
+        #expect(snapshot.onScreenWindowIDs == [73])
+        #expect(snapshot.permitsSemanticWindow(id: 73, pid: 100))
+        #expect(snapshot.permitsSemanticWindow(id: 999, pid: 100))
+        #expect(!snapshot.permitsSemanticWindow(id: 226, pid: 100))
+        #expect(snapshot.permitsSemanticWindow(id: 226, pid: 999))
     }
 
     @Test func missingOnScreenKeyIsNotTreatedAsPositiveEvidence() throws {
         let snapshot = try #require(WindowLayerFilter.snapshot(from: [entry(id: 73)]))
 
-        #expect(snapshot.switchableWindowIDs == [73])
-        #expect(snapshot.onScreenWindows.isEmpty)
+        #expect(snapshot.switchableWindows == [73: 100])
+        #expect(snapshot.onScreenWindowIDs.isEmpty)
     }
 
     @Test func snapshotFailsOpenWhenNoSwitchableWindowsCanBeRead() {

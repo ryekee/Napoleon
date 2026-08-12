@@ -7,13 +7,13 @@ import os
 ///
 /// **两个主要成本，Spike 3（真机，macOS 26）实测**：
 /// - `SCShareableContent.current` ~59ms——贵，不能每次抓图都调一次，缓存成
-///   `scWindows: [WindowID: SCWindow]`。R1 之后这个映射改由 `WindowStore.refreshNow()`
-///   驱动：它每次全量刷新自己抓一次 `SCShareableContent`，同时喂给 `screenLister.windows(from:)`
-///   （跨 Space 窗口过滤）和这里的 `setShareableContent(_:)`（重建映射）——一次 XPC，两个消费者，
-///   映射跟着每次全量刷新一起变新鲜，不再是永远停留在 App 启动那一刻的快照（旧版本只有
+///   `scWindows: [WindowID: SCWindow]`。这个映射由 `WindowStore.auditNow()` 驱动：每次审计
+///   抓一次 `SCShareableContent`，同时喂给 surface 元数据过滤和这里的
+///   `setShareableContent(_:)`（重建映射）——一次 XPC，两个消费者，映射跟着审计一起变新鲜，
+///   不再是永远停留在 App 启动那一刻的快照（旧版本只有
 ///   `warmUp()` 调用过 `refreshShareableContent()`，启动后新建的窗口永远进不了这个映射，只能
 ///   落到更贵的私有全分辨率兜底路径）。`refreshShareableContent()` 仍然保留，专供 `warmUp()`
-///   （启动时还没有 `WindowStore.refreshNow()` 可复用）单独抓一次用。
+///   （启动时还没有审计结果可复用）单独抓一次用。
 /// - `SCScreenshotManager.captureImage` 首次调用 163ms（SCK 冷启动），稳态 22–26ms——
 ///   `warmUp()` 在 App 启动时调一次，用一次无关紧要的抓图把冷启动成本移到启动阶段，
 ///   而不是用户第一次唤出切换器时才付。
@@ -39,7 +39,7 @@ final class ThumbnailService {
 
     private let cache: ByteBudgetCache<WindowID, CGImage>
 
-    /// `setShareableContent(_:)`（R1，`WindowStore.refreshNow()` 每次全量刷新调用）/
+    /// `setShareableContent(_:)`（`WindowStore.auditNow()` 每次审计调用）/
     /// `refreshShareableContent()`（`warmUp()` 专用）重建的 id→SCWindow 映射，
     /// `capture(_:targetSize:)` 靠它定位要抓的窗口，不用每次现抓 `SCShareableContent`。
     private var scWindows: [WindowID: SCWindow] = [:]
@@ -167,10 +167,10 @@ final class ThumbnailService {
     }
 
     /// R1：用一份**已经抓到**的 `SCShareableContent` 重建 id→SCWindow 映射，本身不发起任何
-    /// 请求/不检查权限（权限检查是抓这份 content 时的事）。`WindowStore.refreshNow()` 是这个
-    /// 方法现在的主要调用方——它每次全量刷新自己抓一次 `SCShareableContent`（同时喂给
+    /// 请求/不检查权限（权限检查是抓这份 content 时的事）。`WindowStore.auditNow()` 是这个
+    /// 方法现在的主要调用方——它每次审计抓一次 `SCShareableContent`（同时喂给
     /// `screenLister.windows(from:)`），把结果传进来，取代旧版本「`ThumbnailService` 自己单独
-    /// 再抓一次 `refreshShareableContent()`」的双重 XPC，也让这个映射跟着每次全量刷新一起
+    /// 再抓一次 `refreshShareableContent()`」的双重 XPC，也让这个映射跟着每次审计一起
     /// 变新鲜（不再是永久停留在 `warmUp()` 那一刻的启动快照）。
     func setShareableContent(_ content: SCShareableContent) {
         scWindows = Dictionary(
@@ -180,8 +180,8 @@ final class ThumbnailService {
     }
 
     /// 自己抓一次 `SCShareableContent` 并重建映射——现在只留给 `warmUp()`
-    /// （App 启动时还没有 `WindowStore.refreshNow()` 可复用，得自己抓一次）用。日常的映射刷新
-    /// 改由 `WindowStore.refreshNow()` 抓一次内容后调用 `setShareableContent(_:)`，不再从这里
+    /// （App 启动时还没有审计结果可复用，得自己抓一次）用。日常的映射刷新
+    /// 改由 `WindowStore.auditNow()` 抓一次内容后调用 `setShareableContent(_:)`，不再从这里
     /// 重复抓取（R1，见类型头注释）。
     ///
     /// 无权限/请求失败时**保留旧映射**并记日志，不清空——比起「这次刷新失败就让所有缩略图
