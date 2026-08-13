@@ -64,6 +64,32 @@ import Testing
         #expect(snapshot.onScreenWindowIDs.isEmpty)
     }
 
+    @Test func deadHandleOverridesAStaleWindowServerSurface() throws {
+        let snapshot = try #require(WindowLayerFilter.snapshot(from: [
+            entry(id: 73),
+            entry(id: 74),
+            entry(id: 77, pid: 400, layer: 3)
+        ]))
+
+        let existingWindows = WindowLayerSnapshot.existingWindows(
+            layerSnapshot: snapshot,
+            knownWindows: [73: 100, 75: 200, 76: 300, 77: 300],
+            liveness: [73: .dead, 75: .alive, 76: .unknown, 77: .alive]
+        )
+
+        #expect(existingWindows == [74: 100, 75: 200, 76: 300])
+        #expect(WindowLayerSnapshot.existingWindows(
+            layerSnapshot: nil,
+            knownWindows: [73: 100],
+            liveness: [73: .dead]
+        ) == [:])
+        #expect(WindowLayerSnapshot.existingWindows(
+            layerSnapshot: nil,
+            knownWindows: [73: 100],
+            liveness: [73: .unknown]
+        ) == nil)
+    }
+
     @Test func snapshotFailsOpenWhenNoSwitchableWindowsCanBeRead() {
         #expect(WindowLayerFilter.snapshot(from: [entry(id: 226, layer: 3, onScreen: true)]) == nil)
     }

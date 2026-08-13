@@ -2,6 +2,12 @@ import CoreGraphics
 import Foundation
 import NapoleonCore
 
+enum WindowHandleLiveness: Equatable, Sendable {
+    case alive
+    case dead
+    case unknown
+}
+
 struct WindowLayerSnapshot: Equatable, Sendable {
     let switchableWindows: [WindowID: ProcessID]
     let nonSwitchableWindows: [WindowID: ProcessID]
@@ -21,6 +27,40 @@ struct WindowLayerSnapshot: Equatable, Sendable {
     func permitsSemanticWindow(id: WindowID, pid: ProcessID) -> Bool {
         if switchableWindows[id] == pid { return true }
         return nonSwitchableWindows[id] != pid
+    }
+
+    /// Window Server 的 layer-0 列表会保留已关闭窗口的 backing surface，不能单独证明窗口存活。
+    /// 已缓存 AX 窗口句柄的存活探测优先；失败保持未知，避免误删隐藏、最小化或跨 Space 窗口。
+    static func existingWindows(
+        layerSnapshot: WindowLayerSnapshot?,
+        knownWindows: [WindowID: ProcessID],
+        liveness: [WindowID: WindowHandleLiveness]
+    ) -> [WindowID: ProcessID]? {
+        let hasConclusiveLiveness = liveness.values.contains { $0 != .unknown }
+        guard layerSnapshot != nil || hasConclusiveLiveness else { return nil }
+
+        var result = layerSnapshot?.switchableWindows ?? [:]
+        for (id, pid) in knownWindows {
+            let observedPID = layerSnapshot?.switchableWindows[id] ?? layerSnapshot?.nonSwitchableWindows[id]
+            if let observedPID, observedPID != pid { continue }
+            if layerSnapshot?.nonSwitchableWindows[id] == pid {
+                if result[id] == pid { result.removeValue(forKey: id) }
+                continue
+            }
+            switch liveness[id] ?? .unknown {
+            case .alive:
+                result[id] = pid
+            case .unknown:
+                if result[id] == nil || result[id] == pid {
+                    result[id] = pid
+                }
+            case .dead:
+                if result[id] == pid {
+                    result.removeValue(forKey: id)
+                }
+            }
+        }
+        return result
     }
 }
 

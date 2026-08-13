@@ -154,11 +154,11 @@ final class WindowEnumerator: Sendable {
     }
 
     private static func snapshotRunningApplications() -> [AppSnapshot] {
-        // 常规 App + Napoleon 自己（设置窗口开着时它就是一扇普通窗口）。判据的完整理由见
-        // `NSRunningApplication.isRegularOrSelf`——这条判据同时被 AX 观察者和前台 MRU 使用，
+        // 常规 App + 可能临时拥有 Application Windows 的 accessory App。判据的完整理由见
+        // `NSRunningApplication.canOwnApplicationWindows`——这条判据同时被 AX 观察者和前台 MRU 使用，
         // 三条入口必须同口径。
         return NSWorkspace.shared.runningApplications
-            .filter(\.isRegularOrSelf)
+            .filter(\.canOwnApplicationWindows)
             .map {
                 AppSnapshot(
                     pid: $0.processIdentifier,

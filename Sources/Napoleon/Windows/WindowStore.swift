@@ -29,6 +29,12 @@ final class WindowStore {
         element: AXUIElement
     )
 
+    private struct HandleProbe: @unchecked Sendable {
+        let id: WindowID
+        let pid: ProcessID
+        let element: AXUIElement
+    }
+
     private var registry: CanonicalWindowRegistry
     private(set) var currentSpaceIsFullscreen = false
 
@@ -51,7 +57,7 @@ final class WindowStore {
     private var fullscreenEscapeWindowIDs: Set<WindowID>?
 
     private var environmentEpoch: UInt64 = 0
-    private var pidEpochs: [ProcessID: UInt64] = [:]
+    private var membershipEpochs: [ProcessID: UInt64] = [:]
     private var pendingAudit: DispatchWorkItem?
     private var healthAuditTimer: Timer?
     private var auditInFlight = false
@@ -88,7 +94,7 @@ final class WindowStore {
         observer.onNotification = { [weak self] in self?.handle($0) }
         observer.onAppAppeared = { [weak self] pid in
             guard let self else { return }
-            self.advance(pid)
+            self.advanceMembership(pid)
             self.scheduleAudit()
         }
         observer.onAppTerminated = { [weak self] pid in
@@ -167,21 +173,19 @@ final class WindowStore {
 
     func forget(windowID id: WindowID) {
         guard registry.window(id) != nil || handles[id] != nil else { return }
-        if let pid = registry.window(id)?.pid { advance(pid) }
+        if let pid = registry.window(id)?.pid { advanceMembership(pid) }
         registry.remove(id)
         removeHandle(id)
     }
 
     /// 精确窗口聚焦已经成功时立即提交 MRU，不依赖稍后是否送达 App 激活通知。
     func recordCommittedFocus(_ id: WindowID) {
-        guard let target = registry.window(id) else { return }
-        advance(target.pid)
+        guard registry.window(id) != nil else { return }
         reduceFocusChange(to: id)
     }
 
     /// 没有句柄时只接受 App 激活后的精确 AX 焦点；读不到就等待通知/审计，绝不猜窗口。
     func recordCommittedActivation(pid: ProcessID) {
-        advance(pid)
         _ = repairFocusedWindow(pid: pid)
         scheduleAudit()
     }
@@ -233,10 +237,18 @@ final class WindowStore {
         }
 
         let capturedEnvironmentEpoch = environmentEpoch
-        let capturedPIDEpochs = pidEpochs
+        let capturedMembershipEpochs = membershipEpochs
+        let knownWindows = Dictionary(
+            uniqueKeysWithValues: registry.allWindows.map { ($0.id, $0.pid) }
+        )
+        let handleProbes = handles.compactMap { id, element -> HandleProbe? in
+            guard let pid = knownWindows[id] else { return nil }
+            return HandleProbe(id: id, pid: pid, element: element)
+        }
         async let axTask = enumerator.enumerateAll()
         async let contentTask = Self.fetchShareableContent()
-        let (axResult, content) = await (axTask, contentTask)
+        async let livenessTask = Self.probeWindowLiveness(handleProbes)
+        let (axResult, content, liveness) = await (axTask, contentTask, livenessTask)
 
         guard !isStopped else { return }
         guard Self.auditResultIsCurrent(
@@ -260,13 +272,17 @@ final class WindowStore {
             }
         }
 
-        let existingWindows = axResult.windowLayerSnapshot?.switchableWindows
+        let existingWindows = WindowLayerSnapshot.existingWindows(
+            layerSnapshot: axResult.windowLayerSnapshot,
+            knownWindows: knownWindows,
+            liveness: liveness
+        )
         for result in axResult.appResults.sorted(by: { $0.pid < $1.pid }) {
             guard Self.auditResultIsCurrent(
                 capturedEnvironment: capturedEnvironmentEpoch,
                 currentEnvironment: environmentEpoch,
-                capturedPID: capturedPIDEpochs[result.pid, default: 0],
-                currentPID: pidEpochs[result.pid, default: 0]
+                capturedPID: capturedMembershipEpochs[result.pid, default: 0],
+                currentPID: membershipEpochs[result.pid, default: 0]
             ) else {
                 auditQueued = true
                 continue
@@ -274,16 +290,31 @@ final class WindowStore {
             apply(result, existingWindows: existingWindows)
         }
 
+        let enumeratedPIDs = Set(axResult.appResults.map(\.pid))
+        for pid in Set(knownWindows.values).subtracting(enumeratedPIDs) {
+            guard capturedMembershipEpochs[pid, default: 0] == membershipEpochs[pid, default: 0] else {
+                auditQueued = true
+                continue
+            }
+            registry.applySemanticAudit(
+                pid: pid,
+                windows: [],
+                isComplete: true,
+                existingWindows: existingWindows
+            )
+        }
+
         applyWeakSurfaceMetadata(
             layerSnapshot: axResult.windowLayerSnapshot,
+            existingWindows: existingWindows,
             screenWindows: screenWindows,
-            capturedPIDEpochs: capturedPIDEpochs
+            capturedMembershipEpochs: capturedMembershipEpochs
         )
         pruneTerminatedTargets()
         trimMappingsToRegistry()
         rebuildFullscreenEscapeProjection()
 
-        if let frontmost = NSWorkspace.shared.frontmostApplication, frontmost.isRegularOrSelf {
+        if let frontmost = NSWorkspace.shared.frontmostApplication, frontmost.canOwnApplicationWindows {
             _ = repairFocusedWindow(pid: frontmost.processIdentifier, app: frontmost)
         }
     }
@@ -324,25 +355,20 @@ final class WindowStore {
 
     private func applyWeakSurfaceMetadata(
         layerSnapshot: WindowLayerSnapshot?,
+        existingWindows: [WindowID: ProcessID]?,
         screenWindows: [ScreenWindow],
-        capturedPIDEpochs: [ProcessID: UInt64]
+        capturedMembershipEpochs: [ProcessID: UInt64]
     ) {
-        var identities = layerSnapshot?.switchableWindows ?? [:]
+        guard let existingWindows else { return }
         var onScreenIDs = layerSnapshot?.onScreenWindowIDs ?? []
 
         for window in screenWindows {
-            guard !suppressedWindows.keys.contains(window.windowID) else { continue }
-            guard spaceClassifier.isAssignedToSpace(window.windowID) != false else { continue }
-            guard layerSnapshot?.permitsSemanticWindow(id: window.windowID, pid: window.pid) != false else {
-                continue
-            }
-            if let existingPID = identities[window.windowID], existingPID != window.pid { continue }
-            identities[window.windowID] = window.pid
+            guard existingWindows[window.windowID] == window.pid else { continue }
             if window.isOnScreen { onScreenIDs.insert(window.windowID) }
         }
 
-        for (id, pid) in identities where registry.contains(id, pid: pid) {
-            guard capturedPIDEpochs[pid, default: 0] == pidEpochs[pid, default: 0] else { continue }
+        for (id, pid) in existingWindows where registry.contains(id, pid: pid) {
+            guard capturedMembershipEpochs[pid, default: 0] == membershipEpochs[pid, default: 0] else { continue }
             registry.observeSurface(
                 windowID: id,
                 pid: pid,
@@ -402,39 +428,74 @@ final class WindowStore {
         }
     }
 
+    private nonisolated static func probeWindowLiveness(
+        _ probes: [HandleProbe]
+    ) async -> [WindowID: WindowHandleLiveness] {
+        await withTaskGroup(of: (WindowID, WindowHandleLiveness).self) { group in
+            for probe in probes {
+                group.addTask {
+                    guard probe.pid != NSRunningApplication.ownProcessID else {
+                        return (probe.id, .unknown)
+                    }
+                    AXUIElementSetMessagingTimeout(probe.element, 0.5)
+                    var role: CFTypeRef?
+                    let error = AXUIElementCopyAttributeValue(
+                        probe.element,
+                        kAXRoleAttribute as CFString,
+                        &role
+                    )
+                    switch error {
+                    case .success:
+                        return (probe.id, .alive)
+                    case .invalidUIElement:
+                        return (probe.id, .dead)
+                    default:
+                        return (probe.id, .unknown)
+                    }
+                }
+            }
+
+            var result: [WindowID: WindowHandleLiveness] = [:]
+            for await (id, liveness) in group {
+                result[id] = liveness
+            }
+            return result
+        }
+    }
+
     // MARK: - AX events
 
     private func handle(_ notification: AXWindowNotification) {
         switch notification {
         case .windowCreated(let pid, let element):
-            advance(pid)
+            advanceMembership(pid)
             handleWindowCreated(pid: pid, element: element)
 
         case .windowDestroyed(let pid, let element):
-            advance(pid)
+            advanceMembership(pid)
             handleWindowDestroyed(element: element)
 
         case .minimizedChanged(let pid, let element, let isMinimized):
-            advance(pid)
             guard let id = canonicalWindowID(for: element, pid: pid) else { return }
             registry.updateMinimized(id, isMinimized: isMinimized)
 
         case .titleChanged(let pid, let element):
-            advance(pid)
             guard let id = canonicalWindowID(for: element, pid: pid) else { return }
             let title = Self.readTitle(element)
             let pinyin = enumerator.pinyinEnabled ? PinyinTransformer.pinyin(for: title) : nil
             registry.updateTitle(id, title: title, pinyin: pinyin)
 
         case .focusedWindowChanged(let pid, let element):
-            advance(pid)
             guard let element else { return }
+            if canonicalWindowID(for: element, pid: pid) == nil {
+                advanceMembership(pid)
+            }
             _ = acceptFocusedElement(element, pid: pid)
         }
     }
 
     private func handleWindowCreated(pid: ProcessID, element: AXUIElement) {
-        guard let app = NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else { return }
+        guard let app = NSRunningApplication(processIdentifier: pid), app.canOwnApplicationWindows else { return }
         if let suppressed = enumerator.suppressedWindow(
             for: element,
             pid: pid,
@@ -486,9 +547,8 @@ final class WindowStore {
 
     @objc private func handleAppActivated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.isRegularOrSelf else { return }
+              app.canOwnApplicationWindows else { return }
         let pid = app.processIdentifier
-        advance(pid)
         _ = repairFocusedWindow(pid: pid, app: app)
         scheduleAudit()
     }
@@ -505,7 +565,6 @@ final class WindowStore {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
             return
         }
-        advance(app.processIdentifier)
         registry.updateAppHidden(pid: app.processIdentifier, isHidden: isHidden)
     }
 
@@ -549,7 +608,7 @@ final class WindowStore {
             return true
         }
 
-        guard let app = suppliedApp ?? NSRunningApplication(processIdentifier: pid), app.isRegularOrSelf else {
+        guard let app = suppliedApp ?? NSRunningApplication(processIdentifier: pid), app.canOwnApplicationWindows else {
             return false
         }
         guard let result = enumerator.windowInfo(
@@ -567,7 +626,7 @@ final class WindowStore {
     }
 
     private func removeTerminatedApp(_ pid: ProcessID) {
-        advance(pid)
+        advanceMembership(pid)
         registry.terminateApp(pid: pid)
         removeSuppressedWindows(pid: pid)
         trimMappingsToRegistry()
@@ -575,8 +634,8 @@ final class WindowStore {
 
     // MARK: - Identity and handle maps
 
-    private func advance(_ pid: ProcessID) {
-        pidEpochs[pid, default: 0] &+= 1
+    private func advanceMembership(_ pid: ProcessID) {
+        membershipEpochs[pid, default: 0] &+= 1
     }
 
     private func registerHandle(_ element: AXUIElement, for id: WindowID) {
