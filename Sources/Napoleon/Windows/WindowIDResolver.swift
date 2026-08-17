@@ -42,6 +42,87 @@ final class WindowIDResolver: Sendable {
         return WindowID(cgWindowID)
     }
 
+    /// WindowServer/SCK 能看到、`kAXWindowsAttribute` 却漏掉的当前屏窗口，可从它仍然露出的
+    /// 屏幕区域反向命中 AX 子元素，再沿 `AXWindow` 找回可聚焦的真实窗口句柄。只有 PID 与
+    /// WindowID 双重精确一致才接受；采样点全被遮挡或命中其它窗口时保持 nil。
+    func recoverWindowElement(windowID: WindowID, pid: ProcessID, frame: CGRect) -> AXUIElement? {
+        // ponytail: 只恢复至少一个采样点可命中的窗口；若要覆盖完全遮挡窗口，再接入经实机验证的
+        // WindowID 聚焦后端，不能退回无句柄的 App 级激活。
+        let systemWide = AXUIElementCreateSystemWide()
+        for point in Self.recoverySamplePoints(in: frame) {
+            var hit: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(
+                systemWide,
+                Float(point.x),
+                Float(point.y),
+                &hit
+            ) == .success, let hit else { continue }
+
+            for element in Self.windowCandidates(containing: hit) {
+                var actualPID: pid_t = 0
+                guard Self.isWindowElement(element),
+                      AXUIElementGetPid(element, &actualPID) == .success,
+                      let actualWindowID = self.windowID(for: element),
+                      Self.matchesRecoveredIdentity(
+                          expectedWindowID: windowID,
+                          expectedPID: pid,
+                          actualWindowID: actualWindowID,
+                          actualPID: ProcessID(actualPID)
+                      ) else { continue }
+                return element
+            }
+        }
+        return nil
+    }
+
+    static func recoverySamplePoints(in frame: CGRect) -> [CGPoint] {
+        guard frame.width > 0, frame.height > 0 else { return [] }
+        let ratios: [CGFloat] = [0.1, 0.5, 0.9]
+        return ratios.flatMap { y in
+            ratios.map { x in
+                CGPoint(x: frame.minX + frame.width * x, y: frame.minY + frame.height * y)
+            }
+        }
+    }
+
+    static func matchesRecoveredIdentity(
+        expectedWindowID: WindowID,
+        expectedPID: ProcessID,
+        actualWindowID: WindowID,
+        actualPID: ProcessID
+    ) -> Bool {
+        expectedWindowID == actualWindowID && expectedPID == actualPID
+    }
+
+    private static func windowCandidates(containing hit: AXUIElement) -> [AXUIElement] {
+        var candidates: [AXUIElement] = []
+        for attribute in [kAXWindowAttribute, kAXTopLevelUIElementAttribute] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(hit, attribute as CFString, &value) == .success,
+                  let value,
+                  CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
+            let element = value as! AXUIElement // swiftlint:disable:this force_cast -- CF type checked above
+            if !candidates.contains(where: { CFEqual($0, element) }) {
+                candidates.append(element)
+            }
+        }
+        if CFGetTypeID(hit) == AXUIElementGetTypeID(),
+           !candidates.contains(where: { CFEqual($0, hit) }) {
+            candidates.append(hit)
+        }
+        return candidates
+    }
+
+    private static func isWindowElement(_ element: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXRoleAttribute as CFString,
+            &value
+        ) == .success else { return false }
+        return value as? String == kAXWindowRole
+    }
+
     /// 降级路径：为目标 (pid, frame, title) 从候选列表里挑最佳匹配。纯函数——pid
     /// 必须相等；同 pid 候选里 IoU 最高者胜出（title 完全相等加权）。低置信度一律
     /// 返回 nil——宁可掉 App 图标，也不要认错窗口。

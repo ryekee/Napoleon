@@ -304,6 +304,11 @@ final class WindowStore {
             )
         }
 
+        recoverStrongSurfaceTargets(
+            screenWindows: screenWindows,
+            layerSnapshot: axResult.windowLayerSnapshot
+        )
+
         applyWeakSurfaceMetadata(
             layerSnapshot: axResult.windowLayerSnapshot,
             existingWindows: existingWindows,
@@ -375,6 +380,62 @@ final class WindowStore {
                 isOnCurrentSpace: onScreenIDs.contains(id) ? true : nil,
                 isFullscreen: spaceClassifier.fullscreenStatus(id)
             )
+        }
+    }
+
+    private func recoverStrongSurfaceTargets(
+        screenWindows: [ScreenWindow],
+        layerSnapshot: WindowLayerSnapshot?
+    ) {
+        let candidates = Self.strongSurfaceCandidates(
+            screenWindows: screenWindows,
+            layerSnapshot: layerSnapshot,
+            knownWindowIDs: registry.allWindowIDs,
+            suppressedWindowIDs: Set(suppressedWindows.keys),
+            isAssignedToSpace: spaceClassifier.isAssignedToSpace
+        )
+
+        for candidate in candidates {
+            guard let element = resolver.recoverWindowElement(
+                windowID: candidate.windowID,
+                pid: candidate.pid,
+                frame: candidate.frame
+            ),
+            let app = NSRunningApplication(processIdentifier: candidate.pid),
+            app.canOwnApplicationWindows,
+            let result = enumerator.windowInfo(
+                for: element,
+                pid: candidate.pid,
+                appName: candidate.appName,
+                appBundleID: candidate.appBundleID,
+                isHiddenApp: app.isHidden,
+                windowLayerSnapshot: layerSnapshot
+            ),
+            result.id == candidate.windowID else { continue }
+
+            registry.observeSemanticWindow(result.info)
+            registerHandle(result.element, for: result.id)
+            Self.logger.notice(
+                "recovered omitted AX window id=\(result.id, privacy: .public) pid=\(candidate.pid, privacy: .public)"
+            )
+        }
+    }
+
+    nonisolated static func strongSurfaceCandidates(
+        screenWindows: [ScreenWindow],
+        layerSnapshot: WindowLayerSnapshot?,
+        knownWindowIDs: Set<WindowID>,
+        suppressedWindowIDs: Set<WindowID>,
+        isAssignedToSpace: (WindowID) -> Bool?
+    ) -> [ScreenWindow] {
+        guard let layerSnapshot else { return [] }
+        return screenWindows.filter { window in
+            !knownWindowIDs.contains(window.windowID)
+                && !suppressedWindowIDs.contains(window.windowID)
+                && window.isOnScreen
+                && layerSnapshot.onScreenWindowIDs.contains(window.windowID)
+                && layerSnapshot.switchableWindows[window.windowID] == window.pid
+                && isAssignedToSpace(window.windowID) == true
         }
     }
 
