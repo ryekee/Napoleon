@@ -40,8 +40,9 @@ the overlay only appears if you hold the hotkey long enough to want it.
 Grab the latest build from [Releases](https://github.com/ryekee/Napoleon/releases), or build it
 yourself (below).
 
-Releases are signed but not notarized, so macOS will ask you to approve the app on first launch.
-You will also need to grant the two permissions above in System Settings → Privacy & Security.
+Releases starting with 0.3.1 use Developer ID signing and Apple notarization. Older artifacts
+may still require manual Gatekeeper approval. You will also need to grant the two permissions
+above in System Settings → Privacy & Security when first using the app.
 
 ## Build from source
 
@@ -80,6 +81,10 @@ after switching identities, then grant them again:
 tccutil reset Accessibility com.napoleon.Napoleon
 tccutil reset ScreenCapture com.napoleon.Napoleon
 ```
+
+Official Release builds use a separate Developer ID identity and Apple notarization pipeline;
+the self-signed identity above applies only to local Debug builds. Maintainers should follow
+[`RELEASING.md`](RELEASING.md).
 
 ### Tests
 
@@ -135,7 +140,7 @@ these questions, and it does mean Napoleon is not App Store material.
 
 ## Status
 
-Early but usable daily. Version 0.3.0. Known rough edges:
+Early but usable daily. Version 0.3.1. Known rough edges:
 
 - Windows on another Space that Accessibility can't reach are focused at app level, so a
   multi-window app may not land on the exact window you picked.

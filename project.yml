@@ -8,12 +8,19 @@ options:
 knownRegions: [en, zh-Hans, zh-Hant, ja]
 settings:
   base:
-    CODE_SIGN_IDENTITY: "com.ryekee.napoleon"
     CODE_SIGN_STYLE: Manual
-    DEVELOPMENT_TEAM: ""
   configs:
     Debug:
       ENABLE_TESTABILITY: YES
+      # 本地开发继续使用稳定的自签名身份，避免每次 Debug 重建都丢失 TCC 授权。
+      CODE_SIGN_IDENTITY: "com.ryekee.napoleon"
+      DEVELOPMENT_TEAM: ""
+    Release:
+      CODE_SIGN_IDENTITY: "Developer ID Application: Shenzhen Hiko Technology Co., Ltd. (JQTFJ8P2T7)"
+      DEVELOPMENT_TEAM: JQTFJ8P2T7
+      ENABLE_HARDENED_RUNTIME: YES
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+      OTHER_CODE_SIGN_FLAGS: "--timestamp"
 targets:
   Napoleon:
     type: application
@@ -33,7 +40,7 @@ targets:
         CFBundleDevelopmentRegion: en
         # 版本号显式写在这里（不再吃 XcodeGen 的 1.0/1 默认值）——About 页展示它，
         # 检查更新拿它跟 GitHub Release 的 tag 比对。发版时改这两行。
-        CFBundleShortVersionString: "0.3.0"   # 面向用户的版本号，对应 Release tag v0.3.0
+        CFBundleShortVersionString: "0.3.1"   # 面向用户的版本号，对应 Release tag v0.3.1
         # CFBundleVersion（构建号）由下面的 preBuildScripts 在每次构建时写成 git 提交数。这里的
         # 值只是占位；拿不到 git（比如下载 zip 源码构建）时它会原样留在产物里。
         CFBundleVersion: "0"
