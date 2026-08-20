@@ -36,11 +36,13 @@ import Testing
             windowLayerSnapshot: nil
         )
 
-        #expect(result.windows.map(\.id) == [1])
+        #expect(result.appResults.first { $0.pid == 100 }?.windows.map(\.id) == [1])
         #expect(result.failedApplications == [failure])
+        #expect(result.appResults.first { $0.pid == 100 }?.semanticIsComplete == true)
+        #expect(result.appResults.first { $0.pid == 200 }?.semanticIsComplete == false)
     }
 
-    @Test func successfulLayerSnapshotFiltersWindowsAndHandlesTogether() {
+    @Test func explicitNonStandardLayerFiltersWindowsAndHandlesTogether() {
         let keptHandle = AXUIElementCreateSystemWide()
         let droppedHandle = AXUIElementCreateSystemWide()
         let appResult = WindowEnumerator.AppEnumerationResult(
@@ -52,8 +54,9 @@ import Testing
             failure: nil
         )
         let layerSnapshot = WindowLayerSnapshot(
-            switchableWindowIDs: [1],
-            onScreenWindows: []
+            switchableWindows: [1: 100],
+            nonSwitchableWindows: [2: 100],
+            onScreenWindowIDs: []
         )
 
         let result = WindowEnumerator.merge(
@@ -61,8 +64,8 @@ import Testing
             windowLayerSnapshot: layerSnapshot
         )
 
-        #expect(result.windows.map(\.id) == [1])
-        #expect(Set(result.handles.keys) == [1])
+        #expect(result.appResults.first?.windows.map(\.id) == [1])
+        #expect(Set(result.appResults.first?.handles.keys.map { $0 } ?? []) == [1])
         #expect(result.windowLayerSnapshot == layerSnapshot)
     }
 
@@ -78,7 +81,46 @@ import Testing
 
         let result = WindowEnumerator.merge(appResults: [appResult], windowLayerSnapshot: nil)
 
-        #expect(result.windows.map(\.id) == [1, 2])
+        #expect(result.appResults.first?.windows.map(\.id) == [1, 2])
+    }
+
+    @Test func missingLayerEntryFailsOpenForSemanticAXEvidence() {
+        let appResult = WindowEnumerator.AppEnumerationResult(
+            pid: 100,
+            windows: [window(1, pid: 100), window(2, pid: 100)],
+            handles: [:],
+            suppressedWindows: [],
+            suppressionIsComplete: true,
+            failure: nil
+        )
+        let layerSnapshot = WindowLayerSnapshot(
+            switchableWindows: [1: 100],
+            onScreenWindowIDs: []
+        )
+
+        let result = WindowEnumerator.merge(appResults: [appResult], windowLayerSnapshot: layerSnapshot)
+
+        #expect(result.appResults.first?.windows.map(\.id) == [1, 2])
+    }
+
+    @Test func layerIdentityMismatchCannotOverrideSemanticAXEvidence() {
+        let appResult = WindowEnumerator.AppEnumerationResult(
+            pid: 100,
+            windows: [window(1, pid: 100)],
+            handles: [1: AXUIElementCreateSystemWide()],
+            suppressedWindows: [],
+            suppressionIsComplete: true,
+            failure: nil
+        )
+        let layerSnapshot = WindowLayerSnapshot(
+            switchableWindows: [1: 999],
+            onScreenWindowIDs: [1]
+        )
+
+        let result = WindowEnumerator.merge(appResults: [appResult], windowLayerSnapshot: layerSnapshot)
+
+        #expect(result.appResults.first?.windows.map(\.id) == [1])
+        #expect(Set(result.appResults.first?.handles.keys.map { $0 } ?? []) == [1])
     }
 
     @Test func mergesAttachedSheetsIntoTheSuppressionSetWithoutListingThem() {
@@ -99,9 +141,9 @@ import Testing
 
         let result = WindowEnumerator.merge(appResults: [appResult], windowLayerSnapshot: nil)
 
-        #expect(result.windows.map(\.id) == [1])
-        #expect(result.suppressedWindows.map(\.id) == [9])
-        #expect(result.suppressedWindows.map(\.ownerID) == [1])
+        #expect(result.appResults.first?.windows.map(\.id) == [1])
+        #expect(result.appResults.first?.suppressedWindows.map(\.id) == [9])
+        #expect(result.appResults.first?.suppressedWindows.map(\.ownerID) == [1])
     }
 
     @Test func reportsAppsWhoseAttachedSheetLookupWasIncomplete() {
@@ -116,7 +158,8 @@ import Testing
 
         let result = WindowEnumerator.merge(appResults: [appResult], windowLayerSnapshot: nil)
 
-        #expect(result.suppressionIncompletePIDs == [100])
+        #expect(result.appResults.first?.semanticIsComplete == true)
+        #expect(result.appResults.first?.suppressionIsComplete == false)
     }
 }
 

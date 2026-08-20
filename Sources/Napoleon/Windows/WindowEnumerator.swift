@@ -58,7 +58,7 @@ final class WindowEnumerator: Sendable {
         await withTaskGroup(of: AppEnumerationResult.self) { group in
             for snapshot in snapshots {
                 group.addTask {
-                    self.enumerateWindows(of: snapshot, switchableWindowIDs: nil)
+                    self.enumerateWindows(of: snapshot)
                 }
             }
 
@@ -68,7 +68,7 @@ final class WindowEnumerator: Sendable {
         }
 
         // AX subrole 不足以识别 Electron/Chromium 的无边框浮动窗；全部 AX 枚举完成后只读
-        // 一次窗口服务器，既统一做 layer 过滤，也把同一份快照交给全量刷新做可见性校正。
+        // 一次窗口服务器，既统一做 layer 过滤，也把同一份快照交给 Registry 审计做存在性校验。
         let result = Self.merge(
             appResults: appResults,
             windowLayerSnapshot: WindowLayerFilter.currentSnapshot()
@@ -95,10 +95,7 @@ final class WindowEnumerator: Sendable {
     }
 
     struct EnumerationResult: @unchecked Sendable {
-        let windows: [WindowInfo]
-        let handles: [WindowID: AXUIElement]
-        let suppressedWindows: [SuppressedWindow]
-        let suppressionIncompletePIDs: Set<ProcessID>
+        let appResults: [AppEnumerationResult]
         let windowLayerSnapshot: WindowLayerSnapshot?
         let failedApplications: [ApplicationFailure]
     }
@@ -117,45 +114,33 @@ final class WindowEnumerator: Sendable {
         let suppressedWindows: [SuppressedWindow]
         let suppressionIsComplete: Bool
         let failure: ApplicationFailure?
+
+        var semanticIsComplete: Bool { failure == nil }
     }
 
     static func merge(
         appResults: [AppEnumerationResult],
         windowLayerSnapshot: WindowLayerSnapshot?
     ) -> EnumerationResult {
-        let switchableWindowIDs = windowLayerSnapshot?.switchableWindowIDs
-        var windows: [WindowInfo] = []
-        var handles: [WindowID: AXUIElement] = [:]
-        var suppressedWindows: [SuppressedWindow] = []
-        var suppressedIDs: Set<WindowID> = []
-        var suppressionIncompletePIDs: Set<ProcessID> = []
-        var failedApplications: [ApplicationFailure] = []
-
-        for result in appResults {
-            if let failure = result.failure {
-                failedApplications.append(failure)
+        let filteredResults = appResults.map { result in
+            let windows = result.windows.filter { window in
+                guard let snapshot = windowLayerSnapshot else { return true }
+                return snapshot.permitsSemanticWindow(id: window.id, pid: result.pid)
             }
-            for window in result.windows where switchableWindowIDs?.contains(window.id) != false {
-                windows.append(window)
-                if let handle = result.handles[window.id] {
-                    handles[window.id] = handle
-                }
-            }
-            for window in result.suppressedWindows where suppressedIDs.insert(window.id).inserted {
-                suppressedWindows.append(window)
-            }
-            if !result.suppressionIsComplete {
-                suppressionIncompletePIDs.insert(result.pid)
-            }
+            let ids = Set(windows.map(\.id))
+            return AppEnumerationResult(
+                pid: result.pid,
+                windows: windows,
+                handles: result.handles.filter { ids.contains($0.key) },
+                suppressedWindows: result.suppressedWindows,
+                suppressionIsComplete: result.suppressionIsComplete,
+                failure: result.failure
+            )
         }
-
         return EnumerationResult(
-            windows: windows,
-            handles: handles,
-            suppressedWindows: suppressedWindows,
-            suppressionIncompletePIDs: suppressionIncompletePIDs,
+            appResults: filteredResults,
             windowLayerSnapshot: windowLayerSnapshot,
-            failedApplications: failedApplications
+            failedApplications: filteredResults.compactMap(\.failure)
         )
     }
 
@@ -169,11 +154,11 @@ final class WindowEnumerator: Sendable {
     }
 
     private static func snapshotRunningApplications() -> [AppSnapshot] {
-        // 常规 App + Napoleon 自己（设置窗口开着时它就是一扇普通窗口）。判据的完整理由见
-        // `NSRunningApplication.isRegularOrSelf`——这条判据同时被 AX 观察者、前台 MRU、跨 Space
-        // 合并使用，四处必须同口径。
+        // 常规 App + 可能临时拥有 Application Windows 的 accessory App。判据的完整理由见
+        // `NSRunningApplication.canOwnApplicationWindows`——这条判据同时被 AX 观察者和前台 MRU 使用，
+        // 三条入口必须同口径。
         return NSWorkspace.shared.runningApplications
-            .filter(\.isRegularOrSelf)
+            .filter(\.canOwnApplicationWindows)
             .map {
                 AppSnapshot(
                     pid: $0.processIdentifier,
@@ -189,10 +174,7 @@ final class WindowEnumerator: Sendable {
     /// 单个 App 的枚举——这里发生的每一次 `AXUIElementCopyAttributeValue` 都是同步
     /// mach IPC，是唯一真正的「卡死点」，所以靠 `AXUIElementSetMessagingTimeout`
     /// 兜底；这层本身不额外套超时/重试，交给 messaging timeout 的语义处理。
-    private func enumerateWindows(
-        of app: AppSnapshot,
-        switchableWindowIDs: Set<WindowID>?
-    ) -> AppEnumerationResult {
+    private func enumerateWindows(of app: AppSnapshot) -> AppEnumerationResult {
         let axApp = AXUIElementCreateApplication(app.pid)
         AXUIElementSetMessagingTimeout(axApp, 0.5)
 
@@ -242,7 +224,7 @@ final class WindowEnumerator: Sendable {
                 appName: app.appName,
                 appBundleID: app.appBundleID,
                 isHiddenApp: app.isHiddenApp,
-                switchableWindowIDs: switchableWindowIDs
+                windowLayerSnapshot: nil
             ) else {
                 continue
             }
@@ -321,7 +303,7 @@ final class WindowEnumerator: Sendable {
         appName: String,
         appBundleID: String?,
         isHiddenApp: Bool,
-        switchableWindowIDs: Set<WindowID>? = WindowLayerFilter.currentSwitchableWindowIDs()
+        windowLayerSnapshot: WindowLayerSnapshot? = WindowLayerFilter.currentSnapshot()
     ) -> (info: WindowInfo, id: WindowID, element: AXUIElement)? {
         // subrole 过滤：只收标准窗口 + 对话框，其余（面板、气泡、装饰窗等）跳过。
         let subrole = Self.stringAttribute(element, kAXSubroleAttribute)
@@ -359,9 +341,10 @@ final class WindowEnumerator: Sendable {
             return nil
         }
 
-        // fail-open：只有成功取得窗口服务器快照时才应用 layer 过滤。标准窗口是 layer 0；
-        // NSPanel/浮动 Pet 一类通常是 layer 3，即使 AX 报 AXStandardWindow 也会在这里被排除。
-        if let switchableWindowIDs, !switchableWindowIDs.contains(windowID) {
+        // fail-open：只有窗口服务器明确把同一 ID+PID 标成非标准 layer 时才排除。快照漏项或
+        // 身份冲突都由更强的 AX 语义证据胜出，避免一次弱来源残缺把真实窗口误删。
+        if let windowLayerSnapshot,
+           !windowLayerSnapshot.permitsSemanticWindow(id: windowID, pid: pid) {
             Self.logger.info(
                 "dropping non-standard-layer window id=\(windowID, privacy: .public) pid=\(pid, privacy: .public)"
             )

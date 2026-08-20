@@ -51,7 +51,7 @@ final class ScreenWindowLister {
     /// 留下日志，方便定位「为什么看不到跨 Space 窗口」。
     ///
     /// R1：抓取（本方法，需权限 + XPC）与过滤（`windows(from:)`，纯同步）已经拆开——
-    /// `WindowStore.refreshNow()` 现在自己抓一次 `SCShareableContent`（同时喂给
+    /// `WindowStore.auditNow()` 自己抓一次 `SCShareableContent`（同时喂给
     /// `ThumbnailService`，见该方法注释），直接调 `windows(from:)` 复用这份过滤逻辑，不需要
     /// 再触发第二次 XPC。这里仍然保留 `list()` 独立可用（内部就是「抓取 + `windows(from:)`」
     /// 两步），供 `ScreenWindowListerTests` 之外任何还想要「一步到位」入口的调用方使用。
@@ -74,9 +74,9 @@ final class ScreenWindowLister {
 
     /// R1：纯同步过滤——把一份**已经抓到**的 `SCShareableContent` 过滤成真实 App 窗口列表，
     /// 不发起任何请求、不需要权限检查（抓取这份 content 时权限已经检查过）。跟 `isRealAppWindow`
-    /// 一样只是逻辑搬运，供两处共用：`list()` 自己抓完之后调它；`WindowStore.refreshNow()`
+    /// 一样只是逻辑搬运，供两处共用：`list()` 自己抓完之后调它；`WindowStore.auditNow()`
     /// 把它统一抓的那一份 `SCShareableContent`（同时喂给 `ThumbnailService.setShareableContent`）
-    /// 传进来复用，避免「AX 全量刷新时再单独抓一次 SC 内容」这第二次 XPC（spike 实测单次
+    /// 传进来复用，避免「AX 审计时再单独抓一次 SC 内容」这第二次 XPC（spike 实测单次
     /// ~59ms）。
     func windows(from content: SCShareableContent) -> [ScreenWindow] {
         content.windows.compactMap { window -> ScreenWindow? in

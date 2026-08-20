@@ -87,4 +87,37 @@ import NapoleonCore
 
         #expect(result == nil)
     }
+
+    @Test func recoverySamplesInsetGridPointsInsideTheWindow() {
+        let frame = CGRect(x: 20, y: 40, width: 1_000, height: 800)
+
+        let points = WindowIDResolver.recoverySamplePoints(in: frame)
+
+        #expect(points.count == 9)
+        #expect(points.contains(CGPoint(x: 120, y: 120)))
+        #expect(points.contains(CGPoint(x: 520, y: 440)))
+        #expect(points.contains(CGPoint(x: 920, y: 760)))
+        #expect(points.allSatisfy { frame.contains($0) })
+    }
+
+    @Test func recoveredIdentityRequiresExactWindowAndProcess() {
+        #expect(WindowIDResolver.matchesRecoveredIdentity(
+            expectedWindowID: 6091,
+            expectedPID: 651,
+            actualWindowID: 6091,
+            actualPID: 651
+        ))
+        #expect(!WindowIDResolver.matchesRecoveredIdentity(
+            expectedWindowID: 6091,
+            expectedPID: 651,
+            actualWindowID: 7329,
+            actualPID: 651
+        ))
+        #expect(!WindowIDResolver.matchesRecoveredIdentity(
+            expectedWindowID: 6091,
+            expectedPID: 651,
+            actualWindowID: 6091,
+            actualPID: 999
+        ))
+    }
 }

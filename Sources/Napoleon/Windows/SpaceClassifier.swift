@@ -8,9 +8,8 @@ import NapoleonCore
 /// 原样复用同一套签名/dlsym 探测方式，不做改动。
 ///
 /// 私有 API 一律 dlsym 探测、缓存进 `static let`（探测只做一次，dlsym 不便宜）；任一符号缺失
-/// （系统版本变化导致私有符号消失）时 `isOnFullscreenSpace` 恒返回 `false`——优雅降级：全屏
-/// 窗口这时会被 `WindowFilter` 当成普通跨 Space 窗口处理（默认隐藏，`includeOtherSpaces`
-/// 开关可兜底显示），不会崩溃、也不会误判成「全屏」。
+/// （系统版本变化导致私有符号消失）时窗口分类返回 nil，由调用方保留上一份可靠元数据，
+/// 不会崩溃，也不会用失败结果覆盖已知事实。
 ///
 /// 不是 `Sendable`——只作为 `WindowStore`（`@MainActor`）的私有存储属性使用，跟同类型的
 /// `ScreenWindowLister`/`WindowEnumerator` 一样不需要跨 actor 传递。
@@ -38,8 +37,7 @@ final class SpaceClassifier {
     private static let spacesForWindowsMask: UInt32 = 0x7
 
     /// `refresh()` 建好的「全屏 Space id」集合（`id64`/`ManagedSpaceID`）。`refresh()` 从未
-    /// 成功调用过，或私有符号缺失时保持为空集合——`isOnFullscreenSpace` 因此自然全部返回
-    /// `false`，不需要额外的可用性标志位。
+    /// 成功调用过，或私有符号缺失时保持为空集合，`fullscreenStatus` 因此返回 nil。
     private var fullscreenSpaceIDs: Set<Int> = []
 
     /// `refresh()` 时全部 display 上**所有** Space 的 id 集合（桌面 + 全屏都算）。供
@@ -54,8 +52,8 @@ final class SpaceClassifier {
     var canQueryWindowSpaces: Bool { Self.copySpacesForWindowsFn != nil }
 
     /// 全屏逃生：用户此刻所在的 Space（任一 display 的 `Current Space`）是不是全屏（`type==4`）。
-    /// `refresh()` 每次全量刷新时重算；私有符号缺失/CGS 查询失败时保持 `false`（降级：等同
-    /// 普通桌面，不会误开逃生放行）。多 display 时只要有一个 display 的当前 Space 是全屏就为
+    /// `refresh()` 每次审计时重算；私有符号缺失/CGS 查询失败时保留上一次成功值，避免一次瞬态
+    /// 失败把全屏状态误降成普通桌面。多 display 时只要有一个 display 的当前 Space 是全屏就为
     /// `true`——单 display（最常见）下即精确等于「当前 Space 是否全屏」；多 display 下偏保守地
     /// 多显示窗口（只会让列表更全、绝不漏显该显的窗口），是可接受的 v1 取舍。
     private(set) var currentSpaceIsFullscreen: Bool = false
@@ -73,29 +71,22 @@ final class SpaceClassifier {
 
     init() {}
 
-    /// 重新扫一遍当前 Space 拓扑，重建 `fullscreenSpaceIDs`。每次全量刷新
-    /// （`WindowStore.refreshNow`，CrossSpaceMerge 之前）调一次，保证跟本次要分类的窗口快照
+    /// 重新扫一遍当前 Space 拓扑，重建 `fullscreenSpaceIDs`。每次审计
+    /// （`WindowStore.auditNow` 应用弱来源元数据之前）调一次，保证跟本次要分类的窗口快照
     /// 处在同一个 Space 拓扑状态下——CGS 调用是本地 IPC（同机 Window Server 往返，无网络），
-    /// 可以放心按每次全量刷新的节奏调用，不需要额外节流/缓存有效期。
-    func refresh() {
+    /// 可以放心按审计节奏调用，不需要额外节流/缓存有效期。失败返回 false 且不覆盖上一份好快照。
+    @discardableResult
+    func refresh() -> Bool {
         guard
             let mainConnectionFn = Self.mainConnectionFn,
             let copyManagedDisplaySpacesFn = Self.copyManagedDisplaySpacesFn
         else {
-            fullscreenSpaceIDs = []
-            allSpaceIDs = []
-            currentSpaceIsFullscreen = false
-            currentSpaceIDs = []   // fable 审查第 2 轮 #5：与下方 guard 一致地一并重置（当前不可达，纯一致性）。
-            return
+            return false
         }
 
         let cid = mainConnectionFn()
         guard let displays = copyManagedDisplaySpacesFn(cid)?.takeRetainedValue() as? [[String: Any]] else {
-            fullscreenSpaceIDs = []
-            allSpaceIDs = []
-            currentSpaceIsFullscreen = false
-            currentSpaceIDs = []
-            return
+            return false
         }
 
         var fullscreenIDs = Set<Int>()
@@ -127,11 +118,11 @@ final class SpaceClassifier {
         allSpaceIDs = allIDs
         currentSpaceIsFullscreen = currentFullscreen
         currentSpaceIDs = currentDesktopIDs
+        return true
     }
 
     /// 查 `windowID` 所在的全部 Space id（`CGSCopySpacesForWindows`）。私有符号缺失/查询失败
-    /// 返回 `nil`——两个调用方（`isOnFullscreenSpace`/`isOnSpace`）都把 `nil` 当「查不到 →
-    /// `false`」处理，降级语义见类型文档注释。
+    /// 返回 `nil`，调用方不得据此产生负面结论。
     private func spaceIDs(for windowID: WindowID) -> [Int]? {
         guard
             let mainConnectionFn = Self.mainConnectionFn,
@@ -144,12 +135,9 @@ final class SpaceClassifier {
         return copySpacesForWindowsFn(cid, Self.spacesForWindowsMask, windowIDs)?.takeRetainedValue() as? [Int]
     }
 
-    /// `windowID` 是否位于一个全屏 Space（`refresh()` 建的 `fullscreenSpaceIDs` 里任一）。
-    /// 私有符号缺失、这次 CGS 查询失败，或 `fullscreenSpaceIDs` 为空（`refresh()` 从未成功
-    /// 建过映射/当前压根没有全屏 Space），都返回 `false`——降级语义见类型文档注释。
-    func isOnFullscreenSpace(_ windowID: WindowID) -> Bool {
-        guard !fullscreenSpaceIDs.isEmpty else { return false }
-        guard let spaces = spaceIDs(for: windowID) else { return false }
+    /// 保留“私有查询失败”的 nil，避免弱来源把旧的 true 错盖成 false。
+    func fullscreenStatus(_ windowID: WindowID) -> Bool? {
+        guard !allSpaceIDs.isEmpty, let spaces = spaceIDs(for: windowID) else { return nil }
         return spaces.contains { fullscreenSpaceIDs.contains($0) }
     }
 
