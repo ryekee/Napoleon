@@ -5,9 +5,12 @@ import Foundation
 
 @MainActor
 @Suite struct SettingsStoreTests {
+    private static let suiteName = "napoleon.test.SettingsStoreTests"
+
     private func makeSuite() -> (UserDefaults, String) {
-        let name = "napoleon.test.\(UUID().uuidString)"
-        return (UserDefaults(suiteName: name)!, name)
+        let defaults = UserDefaults(suiteName: Self.suiteName)!
+        defaults.removePersistentDomain(forName: Self.suiteName)
+        return (defaults, Self.suiteName)
     }
 
     @Test func persistsShowDelayMsAcrossInstances() {
