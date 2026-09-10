@@ -23,3 +23,6 @@ xcuserdata/
 # Resources 目录里只有 Info.plist 是 XcodeGen 生成的（内容来自 project.yml 的 info.properties），
 # 其余是手写资源（App 图标资产目录、String Catalog）——必须入库，否则新克隆会丢图标和全部翻译。
 /Resources/Info.plist
+
+# Debug logs
+debug_userlog/
