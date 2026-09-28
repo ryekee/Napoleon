@@ -34,3 +34,14 @@ xcrun stapler validate build/dist/Napoleon-<version>.dmg
 spctl --assess --type open --context context:primary-signature --verbose=4 build/dist/Napoleon-<version>.dmg
 shasum -a 256 build/dist/Napoleon-<version>.dmg
 ```
+
+## 更新清单
+
+公证与 Gatekeeper 验证成功后，脚本生成 `build/dist/update.json`（包括 resume 成功路径）。
+将它与对应版本 DMG 一起上传到同一个 GitHub Release；建议先在 draft 中上传齐全，再发布为最新正式版。
+清单格式为 `{"schemaVersion":1,"version":"0.3.2","notes":""}`，可在上传前填写纯文本 notes。
+version 必须与该 Release 的 `v<version>` tag 和 DMG 版本一致；更新检查仅接受数字正式版本，不接受 beta。
+
+客户端读取 `https://github.com/ryekee/Napoleon/releases/latest/download/update.json`，不调用 REST API。
+清单返回 404 时，兼容历史 Release：以 HEAD 请求读取 `releases/latest` 最终跳转的正式版 tag。
+其他 HTTP 错误或清单损坏均明确报错，不误报“已是最新”。兼容路径不提供内嵌更新说明，用户仍可打开 Release 页面。

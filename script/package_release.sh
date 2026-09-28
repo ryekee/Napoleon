@@ -156,6 +156,10 @@ finish_submission() {
       spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
       validate_gatekeeper_app
       shasum -a 256 "$DMG"
+      # VERSION 已通过字符白名单校验；稳定版清单与 DMG 一起上传。
+      printf '{"schemaVersion":1,"version":"%s","notes":""}\n' "$VERSION" > "$DIST/update.json"
+      plutil -convert xml1 -o /dev/null "$DIST/update.json"
+      echo "✓ 更新清单：$DIST/update.json（与 DMG 一起上传到同一 Release）"
       echo "✓ 公证完成：$DMG"
       echo "  Submission ID：$submission_id"
       ;;

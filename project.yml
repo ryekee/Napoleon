@@ -40,7 +40,7 @@ targets:
         CFBundleDevelopmentRegion: en
         # 版本号显式写在这里（不再吃 XcodeGen 的 1.0/1 默认值）——About 页展示它，
         # 检查更新拿它跟 GitHub Release 的 tag 比对。发版时改这两行。
-        CFBundleShortVersionString: "0.3.2"   # 面向用户的版本号，对应 Release tag v0.3.2
+        CFBundleShortVersionString: "0.3.3"   # 面向用户的版本号，对应 Release tag v0.3.3
         # CFBundleVersion（构建号）由下面的 preBuildScripts 在每次构建时写成 git 提交数。这里的
         # 值只是占位；拿不到 git（比如下载 zip 源码构建）时它会原样留在产物里。
         CFBundleVersion: "0"

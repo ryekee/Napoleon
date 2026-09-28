@@ -63,14 +63,9 @@ enum UpdateState: Equatable {
     case notConfigured
 }
 
-/// Task 21+：通过 GitHub Releases API 检查是否有新版本。
-///
-/// **只检查，不下载安装**——发现新版只提供「前往下载」打开 Release 页面。真正的自动更新
-/// （下载 + 校验签名 + 替换 App + 重启）是独立的一块，需要 Sparkle 或自写更新器 + 公证/签名
-/// 配套，等发布流程稳定后再做；本类型给那一步打好基础（版本比较、Release 元数据获取）。
-///
-/// **无鉴权调用**：GitHub 对未鉴权请求限流 60 次/小时/IP。手动点按钮的量级完全够用，因此不
-/// 引入 token（也就不必处理 token 的存储与泄漏问题）。
+/// 从 Release 附件 update.json 检查正式版本，不使用匿名 REST API 的共享 IP 配额。
+/// 旧 Release 没有清单时，仅通过 releases/latest 的网页跳转兼容。
+/// 只检查版本并打开 Release 页面，不下载或安装应用。
 @MainActor
 final class UpdateChecker: ObservableObject {
     private static let logger = Logger(subsystem: "com.napoleon.Napoleon", category: "UpdateChecker")
@@ -97,7 +92,7 @@ final class UpdateChecker: ObservableObject {
         self.session = session
     }
 
-    /// 查一次最新 Release。重复点击时若已在查询中直接忽略（避免并发请求把限流额度打光）。
+    /// 查一次最新 Release，查询中忽略重复点击。
     func check() async {
         guard state != .checking else { return }
 
@@ -105,82 +100,97 @@ final class UpdateChecker: ObservableObject {
             state = .notConfigured
             return
         }
-        guard let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest") else {
-            state = .failed(String(localized: "Invalid update source: \(repository)"))
-            return
-        }
-
         state = .checking
-
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        // GitHub 要求带 User-Agent，否则可能被拒。
-        request.setValue("Napoleon/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = Self.timeout
-
         do {
-            let (data, response) = try await session.data(for: request)
+            let manifestURL = URL(string: "https://github.com/\(repository)/releases/latest/download/update.json")!
+            let (data, response) = try await fetch(manifestURL)
+            let version: String
+            let notes: String
+            let pageURL: URL
 
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                state = .failed(Self.message(forStatus: http.statusCode))
-                Self.logger.error("update check failed: HTTP \(http.statusCode, privacy: .public)")
-                return
+            if response.statusCode == 404 {
+                // 兼容尚未附带清单的历史正式版；只读取重定向后的 URL，不解析 HTML。
+                let latestURL = URL(string: "https://github.com/\(repository)/releases/latest")!
+                let (_, latestResponse) = try await fetch(latestURL, method: "HEAD")
+                guard latestResponse.statusCode == 200 else {
+                    throw UpdateError.http(latestResponse.statusCode)
+                }
+                guard let url = latestResponse.url,
+                      url.scheme == "https", url.host == "github.com",
+                      url.query == nil, url.fragment == nil,
+                      url.path.hasPrefix("/\(repository)/releases/tag/") else {
+                    throw UpdateError.invalid
+                }
+                let tag = String(url.path.dropFirst("/\(repository)/releases/tag/".count))
+                guard Self.isStableVersion(tag) else { throw UpdateError.invalid }
+                version = tag
+                notes = ""
+                pageURL = url
+            } else {
+                guard response.statusCode == 200 else { throw UpdateError.http(response.statusCode) }
+                let manifest = try JSONDecoder().decode(UpdateManifest.self, from: data)
+                guard manifest.schemaVersion == 1, Self.isStableVersion(manifest.version) else {
+                    throw UpdateError.invalid
+                }
+                version = manifest.version
+                notes = manifest.notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // 下载入口由固定仓库和已校验的版本构造，清单不能提供任意跳转地址。
+                pageURL = URL(string: "https://github.com/\(repository)/releases/tag/v\(version.hasPrefix("v") ? String(version.dropFirst()) : version)")!
             }
 
-            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
-
-            // 不需要自己过滤草稿/预发布：GitHub 的 `/releases/latest` 端点**按定义**返回的就是
-            // 最新的非 draft、非 prerelease release（这也是选它而不是 `/releases` 的原因）。
-            // 之前这里有一个 `guard !draft, !prerelease` 的死判断，而且一旦命中还会谎报「已是
-            // 最新」——真要改用 `/releases`，得挑出最新的正式版，而不是在这里 return。
-
-            let latest = release.tagName
-            guard ReleaseVersion.isNewer(latest, than: currentVersion) else {
+            if ReleaseVersion.isNewer(version, than: currentVersion) {
+                state = .available(version: version, notes: notes, url: pageURL)
+            } else {
                 state = .upToDate(current: currentVersion)
-                return
             }
-            guard let pageURL = URL(string: release.htmlURL) else {
-                state = .failed(String(localized: "Invalid release page URL"))
-                return
+        } catch let error as UpdateError {
+            switch error {
+            case .http(let status):
+                state = .failed(Self.message(forStatus: status))
+                Self.logger.error("update check failed: HTTP \(status, privacy: .public)")
+            case .invalid:
+                state = .failed(String(localized: "Invalid update information"))
             }
-
-            state = .available(
-                version: latest,
-                notes: release.body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-                url: pageURL
-            )
         } catch is DecodingError {
-            state = .failed(String(localized: "Could not read GitHub’s response"))
-            Self.logger.error("update check: decoding failed")
+            state = .failed(String(localized: "Invalid update information"))
         } catch {
-            // 网络不可达/超时/被取消都会落到这里——原样把系统给的描述展示出来，用户能据此
-            // 判断是自己断网还是服务端问题。
             state = .failed(error.localizedDescription)
             Self.logger.error("update check failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    private func fetch(_ url: URL, method: String = "GET") async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        request.httpMethod = method
+        request.setValue("Napoleon/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = Self.timeout
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw UpdateError.invalid }
+        return (data, http)
+    }
+
+    private static func isStableVersion(_ version: String) -> Bool {
+        version.range(of: #"^v?[0-9]+(?:\.[0-9]+){1,3}$"#, options: .regularExpression) != nil
+            && ReleaseVersion.numericComponents(version).count == version.split(separator: ".").count
+    }
+
     private static func message(forStatus status: Int) -> String {
         switch status {
         case 404: return String(localized: "No releases published yet")
-        // 403 = primary rate limit，429 = secondary rate limit，对用户是同一件事。
-        case 403, 429: return String(localized: "Too many requests — try again later (GitHub rate limit)")
+        case 403: return String(localized: "Update server denied access (HTTP 403)")
+        case 429: return String(localized: "Too many update requests — try again later")
         default: return String(localized: "GitHub returned an error (HTTP \(status))")
         }
     }
 
-    /// GitHub Releases API 响应里我们用到的字段（其余忽略）。
-    private struct GitHubRelease: Decodable {
-        let tagName: String
-        let htmlURL: String
-        let body: String?
-        let draft: Bool
-        let prerelease: Bool
+    private enum UpdateError: Error {
+        case http(Int)
+        case invalid
+    }
 
-        enum CodingKeys: String, CodingKey {
-            case tagName = "tag_name"
-            case htmlURL = "html_url"
-            case body, draft, prerelease
-        }
+    private struct UpdateManifest: Decodable {
+        let schemaVersion: Int
+        let version: String
+        let notes: String?
     }
 }
