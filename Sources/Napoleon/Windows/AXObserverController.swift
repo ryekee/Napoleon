@@ -108,8 +108,8 @@ final class AXObserverController {
         isObservingWorkspace = true
 
         // 判据与窗口枚举同口径；accessory App 打开的普通窗口也必须收到创建/销毁通知。
-        for app in NSWorkspace.shared.runningApplications where app.canOwnApplicationWindows {
-            registerApp(pid: app.processIdentifier)
+        for entry in WindowApplicationIdentity.applications() {
+            registerApp(pid: entry.pid)
         }
 
         let center = NSWorkspace.shared.notificationCenter
@@ -180,7 +180,7 @@ final class AXObserverController {
             app.canOwnApplicationWindows
         else { return }
 
-        let pid = app.processIdentifier
+        guard let pid = app.windowOwnerPID else { return }
         let isFirstAppearance = !appearedPIDs.contains(pid)
         registerApp(pid: pid)
         if isFirstAppearance {
@@ -191,7 +191,10 @@ final class AXObserverController {
     @objc private func handleAppTerminated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
 
-        let pid = app.processIdentifier
+        guard let pid = app.windowOwnerPID else {
+            pruneTerminatedApplications()
+            return
+        }
         if let appState = appStates.removeValue(forKey: pid) {
             tearDown(appState)
         }
@@ -215,6 +218,14 @@ final class AXObserverController {
         appearedPIDs.remove(pid)
     }
 
+    /// Also clean up observers when a termination notification has lost its PID.
+    func pruneTerminatedApplications() {
+        for pid in appearedPIDs.filter({ WindowApplicationIdentity.isConfirmedTerminated($0) }) {
+            forgetTerminatedApp(pid)
+            onAppTerminated?(pid)
+        }
+    }
+
     // MARK: - Per-app observer setup
 
     /// 给一个 pid 建 `AXObserver`（若已存在簿记则 no-op——幂等），挂主 run loop source，注册
@@ -224,7 +235,8 @@ final class AXObserverController {
     /// 「这个 pid 出现过、以后退出需要通知 12b」跟「observer 建没建成功」是两件事，调用方
     /// （`handleAppLaunched`）在调用前后比较 `appearedPIDs` 的差异来决定要不要触发
     /// `onAppAppeared`，所以这里的插入本身必须无条件、且对重复调用天然幂等（`Set.insert`）。
-    private func registerApp(pid: ProcessID) {
+    func registerApp(pid: ProcessID) {
+        guard pid > 0 else { return }
         appearedPIDs.insert(pid)
         guard appStates[pid] == nil else { return }
 

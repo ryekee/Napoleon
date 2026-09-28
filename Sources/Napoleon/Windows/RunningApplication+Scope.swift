@@ -20,3 +20,53 @@ extension NSRunningApplication {
         activationPolicy != .prohibited
     }
 }
+
+/// LaunchServices can return a live application whose processIdentifier is -1.
+/// WindowServer supplies candidate PIDs only; AX still decides which windows become targets.
+enum WindowApplicationIdentity {
+    static func resolve(reportedPID: ProcessID, matchingOwnerPIDs: [ProcessID]) -> ProcessID? {
+        if reportedPID > 0 { return reportedPID }
+        let candidates = Set(matchingOwnerPIDs.filter { $0 > 0 })
+        return candidates.count == 1 ? candidates.first : nil
+    }
+
+    static func ownerPIDs() -> Set<ProcessID> {
+        let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], 0)
+            as? [[String: Any]] ?? []
+        return Set(raw.compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
+            .filter { $0 > 0 })
+    }
+
+    static func applications() -> [(pid: ProcessID, app: NSRunningApplication)] {
+        var result: [ProcessID: NSRunningApplication] = [:]
+        for app in NSWorkspace.shared.runningApplications
+            where app.canOwnApplicationWindows && app.processIdentifier > 0 {
+            result[app.processIdentifier] = app
+        }
+        // Use the queried PID, never round-trip it through the broken application property.
+        for pid in ownerPIDs() where result[pid] == nil {
+            guard let app = NSRunningApplication(processIdentifier: pid),
+                  app.canOwnApplicationWindows, !app.isTerminated else { continue }
+            result[pid] = app
+        }
+        return result.map { (pid: $0.key, app: $0.value) }
+    }
+
+    static func isConfirmedTerminated(_ pid: ProcessID) -> Bool {
+        guard pid > 0 else { return true }
+        // Missing LaunchServices entries and EPERM are not proof of process death.
+        return kill(pid, 0) == -1 && errno == ESRCH
+    }
+}
+
+extension NSRunningApplication {
+    var windowOwnerPID: ProcessID? {
+        if processIdentifier > 0 { return processIdentifier }
+        let matches = WindowApplicationIdentity.ownerPIDs().filter { pid in
+            guard let candidate = NSRunningApplication(processIdentifier: pid) else { return false }
+            // Compare application identity, not name/bundle ID (multiple instances may share those).
+            return candidate == self
+        }
+        return WindowApplicationIdentity.resolve(reportedPID: processIdentifier, matchingOwnerPIDs: Array(matches))
+    }
+}

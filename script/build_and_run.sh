@@ -15,6 +15,8 @@ stop_existing_app() {
 }
 
 build_app() {
+  # project.yml is authoritative; never reuse stale generated signing settings.
+  (cd "$ROOT_DIR" && xcodegen generate)
   xcodebuild \
     -project "$ROOT_DIR/Napoleon.xcodeproj" \
     -scheme "$APP_NAME" \
@@ -24,12 +26,30 @@ build_app() {
     build
 }
 
+verify_signing() {
+  local expected_requirement='identifier "com.napoleon.Napoleon" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "JQTFJ8P2T7"'
+  /usr/bin/codesign --verify --deep --strict -R "=$expected_requirement" "$APP_BUNDLE"
+
+  local installed_app="/Applications/$APP_NAME.app"
+  if [[ -d "$installed_app" ]]; then
+    local installed_requirement
+    installed_requirement=$(/usr/bin/codesign -d -r- "$installed_app" 2>&1 | sed -n 's/^designated => //p')
+    if [[ -z "$installed_requirement" ]]; then
+      echo "error: Cannot read installed app signing identity; refusing to launch." >&2
+      return 1
+    fi
+    /usr/bin/codesign --verify -R "=$installed_requirement" "$APP_BUNDLE"
+  fi
+}
+
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
-stop_existing_app
 build_app
+verify_signing
+# Keep the running app available if building or signature verification fails.
+stop_existing_app
 
 case "$MODE" in
   run)

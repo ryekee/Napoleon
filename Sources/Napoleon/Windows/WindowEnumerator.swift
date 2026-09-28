@@ -157,14 +157,13 @@ final class WindowEnumerator: Sendable {
         // 常规 App + 可能临时拥有 Application Windows 的 accessory App。判据的完整理由见
         // `NSRunningApplication.canOwnApplicationWindows`——这条判据同时被 AX 观察者和前台 MRU 使用，
         // 三条入口必须同口径。
-        return NSWorkspace.shared.runningApplications
-            .filter(\.canOwnApplicationWindows)
+        return WindowApplicationIdentity.applications()
             .map {
                 AppSnapshot(
-                    pid: $0.processIdentifier,
-                    appName: $0.localizedName ?? "",
-                    appBundleID: $0.bundleIdentifier,
-                    isHiddenApp: $0.isHidden
+                    pid: $0.pid,
+                    appName: $0.app.localizedName ?? "",
+                    appBundleID: $0.app.bundleIdentifier,
+                    isHiddenApp: $0.app.isHidden
                 )
             }
     }

@@ -196,3 +196,27 @@ import Testing
         #expect(ownerID == nil)
     }
 }
+
+@Suite struct WindowApplicationIdentityTests {
+    @Test func invalidLaunchServicesPIDUsesUniqueWindowOwner() {
+        #expect(WindowApplicationIdentity.resolve(reportedPID: -1, matchingOwnerPIDs: [83316]) == 83316)
+        #expect(WindowApplicationIdentity.resolve(reportedPID: 0, matchingOwnerPIDs: [42, 42, -1]) == 42)
+    }
+
+    @Test func validPIDDoesNotDependOnWindowServerVisibility() {
+        #expect(WindowApplicationIdentity.resolve(reportedPID: 42, matchingOwnerPIDs: []) == 42)
+        #expect(WindowApplicationIdentity.resolve(reportedPID: 42, matchingOwnerPIDs: [99]) == 42)
+    }
+
+    @Test func unresolvedOrAmbiguousIdentityNeverGuessesAProcess() {
+        #expect(WindowApplicationIdentity.resolve(reportedPID: -1, matchingOwnerPIDs: []) == nil)
+        #expect(WindowApplicationIdentity.resolve(reportedPID: -1, matchingOwnerPIDs: [-1, 0]) == nil)
+        #expect(WindowApplicationIdentity.resolve(reportedPID: -1, matchingOwnerPIDs: [42, 99]) == nil)
+    }
+
+    @Test func liveProcessIsNotPrunedBecauseApplicationMetadataIsMissing() {
+        #expect(!WindowApplicationIdentity.isConfirmedTerminated(ProcessInfo.processInfo.processIdentifier))
+        #expect(WindowApplicationIdentity.isConfirmedTerminated(-1))
+        #expect(WindowApplicationIdentity.isConfirmedTerminated(0))
+    }
+}

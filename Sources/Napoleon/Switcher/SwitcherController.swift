@@ -166,7 +166,7 @@ final class SwitcherController: HotkeyManagerDelegate {
         case .allWindows:
             mode = .allWindows
         case .currentApp:
-            mode = .currentApp(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)
+            mode = .currentApp(NSWorkspace.shared.frontmostApplication?.windowOwnerPID ?? -1)
         }
 
         let (state, hs, currentSpaceIsFullscreen) = windowStore.snapshot()

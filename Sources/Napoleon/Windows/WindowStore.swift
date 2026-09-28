@@ -287,6 +287,7 @@ final class WindowStore {
                 auditQueued = true
                 continue
             }
+            observer.registerApp(pid: result.pid)
             apply(result, existingWindows: existingWindows)
         }
 
@@ -319,8 +320,9 @@ final class WindowStore {
         trimMappingsToRegistry()
         rebuildFullscreenEscapeProjection()
 
-        if let frontmost = NSWorkspace.shared.frontmostApplication, frontmost.canOwnApplicationWindows {
-            _ = repairFocusedWindow(pid: frontmost.processIdentifier, app: frontmost)
+        if let frontmost = NSWorkspace.shared.frontmostApplication, frontmost.canOwnApplicationWindows,
+           let pid = frontmost.windowOwnerPID {
+            _ = repairFocusedWindow(pid: pid, app: frontmost)
         }
     }
 
@@ -440,8 +442,9 @@ final class WindowStore {
     }
 
     private func pruneTerminatedTargets() {
-        let livePIDs = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
-        let deadPIDs = Set(registry.allWindows.map(\.pid)).subtracting(livePIDs)
+        observer.pruneTerminatedApplications()
+        let deadPIDs = Set(registry.allWindows.map(\.pid))
+            .filter { WindowApplicationIdentity.isConfirmedTerminated($0) }
         for pid in deadPIDs {
             Self.logger.notice("removing targets for terminated pid=\(pid, privacy: .public)")
             observer.forgetTerminatedApp(pid)
@@ -609,7 +612,7 @@ final class WindowStore {
     @objc private func handleAppActivated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               app.canOwnApplicationWindows else { return }
-        let pid = app.processIdentifier
+        guard let pid = app.windowOwnerPID else { return }
         _ = repairFocusedWindow(pid: pid, app: app)
         scheduleAudit()
     }
@@ -626,7 +629,8 @@ final class WindowStore {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
             return
         }
-        registry.updateAppHidden(pid: app.processIdentifier, isHidden: isHidden)
+        guard let pid = app.windowOwnerPID else { return }
+        registry.updateAppHidden(pid: pid, isHidden: isHidden)
     }
 
     private func repairFocusedWindow(pid: ProcessID, app: NSRunningApplication? = nil) -> Bool {
