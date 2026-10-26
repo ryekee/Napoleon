@@ -1,162 +1,133 @@
 # Napoleon
 
-A keyboard window switcher for macOS, with live window thumbnails.
+A native macOS window switcher with window previews, app grouping, and Pinyin search.
 
 > *Every window has its Waterloo.*
 
-macOS's built-in ⌘Tab switches **applications**, and shows you icons. Napoleon switches
-**windows**, and shows you what each one actually looks like. It lives in the menu bar, has no
-main window, and is built to stay out of the way: no polling while idle, no persistent UI, and
-the overlay only appears if you hold the hotkey long enough to want it.
+[Website](https://napoleon.ryekee.workers.dev/) ·
+[Download](https://github.com/ryekee/Napoleon/releases/latest) ·
+[FAQ](https://napoleon.ryekee.workers.dev/faqs/) ·
+[Changelog](https://napoleon.ryekee.workers.dev/changelog/)
 
-## Features
-
-- **Thumbnail previews.** Each window is a card with a live capture, not an icon. This is the
-  whole point of the project.
-- **Two hotkeys.** ⌘Tab cycles every window, ⌘\` cycles windows of the current app. Both are
-  rebindable.
-- **Window or app switching.** Keep every window separate, or group windows by application and
-  use ⌘\` to move within the selected app's stack.
-- **Quick-switch stays quick.** Tap and release faster than the display delay and Napoleon
-  switches straight to your previous window without flashing an overlay.
-- **Search.** Start typing to filter by app name or window title. Chinese titles can be matched
-  by Pinyin (`gouwu` → 购物清单).
-- **Keyboard, mouse, or both.** Tab/⇧Tab, arrow keys for grid navigation, hover and click, Esc
-  to cancel.
-- **Full-screen aware.** Full-screen apps appear in the list, and while you are inside a
-  full-screen space your desktop windows stay reachable, so you can get back out.
-- **Localized.** English, 简体中文, 繁體中文, 日本語.
-
-## Requirements
-
-- macOS 14 (Sonoma) or later
-- **Accessibility** permission, required. Without it Napoleon cannot intercept the hotkey or
-  focus windows, and the menu bar icon shows a warning.
-- **Screen Recording** permission, optional. Without it the switcher still works, but cards fall
-  back to app icons instead of thumbnails.
+Napoleon lives in the menu bar. Hold a shortcut to see your windows, choose the one you
+want, and release to switch. A quick tap takes you straight to the previous window
+without showing the overlay.
 
 ## Install
 
-Grab the latest build from [Releases](https://github.com/ryekee/Napoleon/releases), or build it
-yourself (below).
+1. Download the DMG from [the latest release](https://github.com/ryekee/Napoleon/releases/latest).
+2. Open it and drag Napoleon into Applications.
+3. Launch Napoleon and grant **Accessibility** access in System Settings → Privacy & Security.
+4. Enable **Screen Recording** if you want window previews. Without it, Napoleon uses app icons.
 
-Releases starting with 0.3.1 use Developer ID signing and Apple notarization. Older artifacts
-may still require manual Gatekeeper approval. You will also need to grant the two permissions
-above in System Settings → Privacy & Security when first using the app.
+Requires **macOS 14 Sonoma or later**. The current release, **0.3.3**, supports Apple Silicon
+and Intel, uses Developer ID signing, and is notarized by Apple.
+
+## Switch, group, and search
+
+| Action | Default control |
+| --- | --- |
+| Switch between all windows | Hold ⌘ and press Tab |
+| Switch within the current app | Hold ⌘ and press the backtick key (\`) |
+| Move through the switcher | Tab / ⇧Tab or arrow keys |
+| Filter windows | Type an app name or window title |
+| Activate a window | Release the shortcut modifier, or click a card |
+| Cancel | Esc |
+
+Both switching shortcuts are configurable in Settings.
+
+- **Window previews.** See the contents of each window, with app icons as a fallback
+  when a preview is unavailable.
+- **Optional app grouping.** Keep windows separate or group them by app. In grouped mode,
+  use the current-app shortcut to cycle through the selected app's windows.
+- **Quick switching.** Release before the display delay to switch without flashing the
+  overlay. The default delay is 100 ms and can be adjusted.
+- **Pinyin search.** Match Chinese app names and window titles by Pinyin, such as
+  `gouwu` for 购物清单.
+- **Keyboard and mouse.** Navigate the grid with keys or select a window with the pointer.
+- **Spaces and full-screen windows.** Reach windows across Spaces, including desktop
+  windows while working in a full-screen Space. See the limitations below.
+- **Four app languages.** English, 简体中文, 繁體中文, and 日本語.
+
+The website is also available in [French](https://napoleon.ryekee.workers.dev/fr/),
+[Simplified Chinese](https://napoleon.ryekee.workers.dev/zh-hans/),
+[Traditional Chinese](https://napoleon.ryekee.workers.dev/zh-hant/), and
+[Japanese](https://napoleon.ryekee.workers.dev/ja/). French is currently available on
+the website only.
+
+## Permissions and privacy
+
+**Accessibility** lets Napoleon handle switching shortcuts and focus windows.
+**Screen Recording** lets it capture window previews; switching still works without it.
+
+Window previews and diagnostic reports stay on your Mac. Update checks fetch release
+metadata from GitHub. If you choose to export a diagnostic report, you decide whether
+to share it; Napoleon does not upload it automatically.
+
+## Known limitations
+
+- When Accessibility cannot reach a window on another Space, Napoleon may activate its
+  app without focusing the exact window you selected.
+- With a second display left in a full-screen Space, the list of desktop windows can
+  become stale until you visit a desktop again.
+- Some Java, SDL, and other apps expose incomplete window information to Accessibility.
+- Some window and Space operations use private macOS APIs. Their behavior can change
+  with macOS updates.
+
+For a reproducible problem, [open an issue](https://github.com/ryekee/Napoleon/issues)
+with your macOS version, Napoleon version, affected app, and steps to reproduce it.
+Review any diagnostic report before attaching it.
 
 ## Build from source
 
-Requires [XcodeGen](https://github.com/yonaskolb/XcodeGen) and Xcode.
+The default maintainer workflow requires Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen),
+and the project's Developer ID certificate with its private key.
 
-```bash
+```sh
+git clone https://github.com/ryekee/Napoleon.git
+cd Napoleon
 brew install xcodegen
-xcodegen generate
-xcodebuild -project Napoleon.xcodeproj -scheme Napoleon \
-  -configuration Debug -derivedDataPath build -destination 'platform=macOS' build
-open build/Build/Products/Debug/Napoleon.app
+./script/build_and_run.sh --verify
 ```
 
-Clone with full history. The build number comes from the commit count, so a shallow clone
-(`--depth 1`) would produce a wrong one, and the build stops rather than stamp it.
+Use a full clone. The build number comes from the Git commit count, and shallow clones
+are rejected. `project.yml` is the build configuration source; the helper regenerates
+the Xcode project before building.
 
-### Code signing
+Debug and Release use the same signing identity:
 
-The project signs with a **fixed self-signed certificate** named `com.ryekee.napoleon` rather
-than ad-hoc. This matters more than it sounds: TCC ties granted permissions to the signing
-identity, and ad-hoc signing produces a new identity on every build, so macOS would forget your
-Accessibility and Screen Recording grants each time you rebuild.
-
-Create your own certificate with that name (Keychain Access → Certificate Assistant → Create a
-Certificate → *Code Signing*, self-signed), or point `CODE_SIGN_IDENTITY` in `project.yml` at one
-you already have. Verify it exists with:
-
-```bash
-security find-identity -v -p codesigning | grep com.ryekee.napoleon
+```text
+Developer ID Application: Shenzhen Hiko Technology Co., Ltd. (JQTFJ8P2T7)
+Bundle ID: com.napoleon.Napoleon
 ```
 
-If you previously ran an ad-hoc build and granted permissions to it, reset the two TCC entries
-after switching identities, then grant them again:
+The helper builds into `build/`, verifies the signature and, when present, the installed
+`/Applications/Napoleon.app` designated requirement, then replaces the running instance.
+If the build or signature check fails, it leaves the existing instance running. It does
+not overwrite the installed app in `/Applications`.
 
-```bash
-tccutil reset Accessibility com.napoleon.Napoleon
-tccutil reset ScreenCapture com.napoleon.Napoleon
-```
-
-Official Release builds use a separate Developer ID identity and Apple notarization pipeline;
-the self-signed identity above applies only to local Debug builds. Maintainers should follow
-[`RELEASING.md`](RELEASING.md).
+The default helper cannot run without that signing identity. Contributors without access
+to it need their own signing setup for a separate fork. Do not substitute a self-signed or
+ad-hoc identity for the maintainer workflow, or reset privacy permissions to bypass a
+signature mismatch. Matching signatures does not by itself verify Accessibility or Screen
+Recording access; check both in the running app.
 
 ### Tests
 
-```bash
+```sh
+xcodegen generate
 xcodebuild -project Napoleon.xcodeproj -scheme NapoleonCore -destination 'platform=macOS' test
-xcodebuild -project Napoleon.xcodeproj -scheme Napoleon     -destination 'platform=macOS' test
+xcodebuild -project Napoleon.xcodeproj -scheme Napoleon -destination 'platform=macOS' test
 ```
 
-`NapoleonCore` holds the pure logic (window filtering, MRU ordering, selection, the state
-reducer) and is unit-tested. The integration layer, meaning Accessibility, ScreenCaptureKit, the
-event tap, and Spaces, cannot be meaningfully unit-tested and is verified by hand instead.
+`NapoleonCore` contains window filtering, ordering, selection, and registry logic.
+Automated tests cover these rules and parts of the app layer. Accessibility, capture,
+hotkeys, and Spaces also need checks in a running app; see the
+[manual test matrix](docs/test-matrix.md).
 
-## How it works
-
-- A session-level, consuming `CGEventTap` on a dedicated thread intercepts the hotkey and
-  swallows keystrokes for the duration of a switching session, so the system switcher never
-  appears and your keystrokes don't leak into the app underneath.
-- Window enumeration is Accessibility-based, kept warm in a store that is updated incrementally
-  by `AXObserver` notifications rather than re-enumerated on every keypress. That is what keeps
-  the overlay's appearance immediate.
-- Thumbnails come from ScreenCaptureKit, cached under a byte budget with LRU eviction, and
-  opportunistically pre-warmed when a window loses focus, the moment a window is most likely to
-  become the next thing you switch back to.
-
-### Activation policy
-
-Napoleon runs as a background agent (`.accessory`), and that is load-bearing rather than
-cosmetic. Since macOS 14, cooperative activation only lets background agents activate other
-apps; a regular app that isn't frontmost cannot. Napoleon always focuses windows from the
-background, so promoting it to a regular app would break switching outright.
-
-The settings window is the one exception. While it is frontmost, the process becomes
-`.regular` so that it gets a Dock icon like any other window, and drops back to `.accessory` the
-moment it stops being frontmost. That is also why the settings window shows up in the switcher
-alongside everything else.
-
-### Private APIs
-
-Napoleon uses six private symbols, each resolved with `dlsym` at runtime and each with a defined
-fallback if it ever disappears. The app degrades, it does not crash:
-
-| Symbol | Used for | Without it |
-|---|---|---|
-| `_AXUIElementGetWindow` | map an `AXUIElement` to its `CGWindowID` | falls back to geometry/title scoring |
-| `CGSHWCaptureWindowList` | capture minimized windows | those cards show an icon |
-| `CGSMainConnectionID` | connection handle for the two below | Space classification disabled |
-| `CGSCopyManagedDisplaySpaces` | classify Spaces (desktop vs full-screen) | full-screen windows treated as ordinary cross-Space ones |
-| `CGSCopySpacesForWindows` | which Space a window is on | the full-screen escape list falls back to showing all desktop windows |
-| `SLPSSetFrontProcessWithOptions` | bring Napoleon itself to the front | picking Napoleon's own settings window may leave it behind the current app |
-
-This is the usual trade-off for a window switcher on macOS. The public APIs alone cannot answer
-these questions, and it does mean Napoleon is not App Store material.
-
-## Status
-
-Early but usable daily. Version 0.3.1. Known rough edges:
-
-- Windows on another Space that Accessibility can't reach are focused at app level, so a
-  multi-window app may not land on the exact window you picked.
-- With a second display parked in a full-screen space for a long time, the "escape" list can go
-  stale until you visit a desktop again.
-- Unusual toolkits (Java/Swing, SDL games) expose windows inconsistently through Accessibility,
-  so results vary.
+For signed distribution builds and notarization, see [RELEASING.md](RELEASING.md).
+Packaging does not publish a GitHub Release.
 
 ## License
 
-[GNU AGPL v3.0](LICENSE), Copyright © 2026 Ryekee.
-
-Use it, study it, change it, share it. The one obligation: if you distribute Napoleon or a
-derivative, or run a modified version as a network service, you must release your source under
-the AGPL too. In other words, improvements stay open, and nobody gets to take this
-closed-source.
-
-If you need to build something proprietary on top of it, open an issue and we can discuss a
-separate commercial license.
+[GNU AGPL v3.0](LICENSE). Copyright © 2026 Ryekee.
