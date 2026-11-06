@@ -1,0 +1,54 @@
+name: Deploy website
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to production after checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: napoleon-production-website
+  cancel-in-progress: false
+
+jobs:
+  website:
+    if: (github.event_name == 'release' && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Read published GitHub releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHED_TAG: ${{ github.event.release.tag_name }}
+        run: python3 site/sync_releases.py --expect-tag "$PUBLISHED_TAG"
+      - name: Build and check all languages
+        run: |
+          python3 site/test_releases.py
+          python3 site/build.py --origin https://napoleon.ryekee.workers.dev
+          python3 site/check.py
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check Cloudflare deployment package
+        run: npx --yes wrangler@4.158.0 deploy --dry-run
+      - name: Deploy website to Cloudflare
+        if: github.event_name == 'release' || inputs.deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          : "${CLOUDFLARE_ACCOUNT_ID:?Set the CLOUDFLARE_ACCOUNT_ID repository secret}"
+          : "${CLOUDFLARE_API_TOKEN:?Set the CLOUDFLARE_API_TOKEN repository secret}"
+          npx --yes wrangler@4.158.0 deploy

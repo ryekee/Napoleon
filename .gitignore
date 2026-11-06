@@ -26,3 +26,9 @@ xcuserdata/
 
 # Debug logs
 debug_userlog/
+
+# Website build output; regenerate with python3 site/build.py.
+/site/dist/
+/site/__pycache__/
+/site/design/
+/.wrangler/

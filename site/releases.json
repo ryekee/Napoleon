@@ -1,0 +1,30 @@
+[
+  {
+    "version": "0.4.0",
+    "date": "2026-11-06",
+    "url": "https://github.com/ryekee/Napoleon/releases/tag/v0.4.0",
+    "download": "https://github.com/ryekee/Napoleon/releases/download/v0.4.0/Napoleon-0.4.0.dmg",
+    "notes": "## 中文\n\n- 在 Switcher 中，把鼠标移到窗口卡片上，点击左上角的 × 即可关闭窗口。继续按住快捷键的修饰键，下一张卡片会补到原位，可以接着点击。\n- 按 App 聚合时，点击 × 会关闭 Napoleon 识别到的该 App 的所有窗口，包括搜索时被筛掉的窗口。\n\n## English\n\n- Hover over a window card in the switcher and click × in the upper-left corner to close it. Keep holding the shortcut modifier and the next card moves into place, so you can click again.\n- When windows are grouped by app, clicking × closes all windows Napoleon can see for that app, including windows filtered out by your search.\n"
+  },
+  {
+    "version": "0.3.3",
+    "date": "2026-09-28",
+    "url": "https://github.com/ryekee/Napoleon/releases/tag/v0.3.3",
+    "download": "https://github.com/ryekee/Napoleon/releases/download/v0.3.3/Napoleon-0.3.3.dmg",
+    "notes": "## 中文\n\n### 更新检查修复\n\n- 更新检查改为读取 GitHub Release 附带的静态更新清单，避免匿名 GitHub REST API 共享 IP 配额耗尽导致检查失败。\n- 对尚未附带更新清单的历史 Release，通过最新 Release 网页跳转识别版本。\n- 修正所有 HTTP 403 都被误报为限流的问题，并明确提示访问拒绝、请求过多或更新信息损坏。\n\n### 下载\n\n`Napoleon-0.3.3.dmg` 支持 Apple Silicon 和 Intel，使用 Developer ID 签名并通过 Apple 公证，DMG 已附加公证票据。\n\n仍在使用旧版且检查更新失败的用户，请从本页手动下载并更新一次。\n\n## English\n\n### Update checking fixes\n\n- Update checks now read a static manifest attached to GitHub Releases, avoiding failures caused by shared IP rate limits on the unauthenticated GitHub REST API.\n- Older releases without a manifest remain supported through the latest release page redirect.\n- HTTP 403 responses are no longer always labeled as rate limiting. Access denial, excessive requests, and invalid update metadata now have distinct errors.\n\n### Download\n\n`Napoleon-0.3.3.dmg` is a universal Apple Silicon / Intel build, signed with Developer ID and notarized by Apple, with a stapled notarization ticket.\n\nIf update checks fail in an older version, download and install this release manually once.\n"
+  },
+  {
+    "version": "0.3.2",
+    "date": "2026-09-28",
+    "url": "https://github.com/ryekee/Napoleon/releases/tag/v0.3.2",
+    "download": "https://github.com/ryekee/Napoleon/releases/download/v0.3.2/Napoleon-0.3.2.dmg",
+    "notes": "## 中文\n\n### 窗口切换修复\n\n- 修复 Device Hub 等应用的窗口可能不出现在切换器中的问题：当 macOS 应用信息返回无效进程 ID 时，从窗口服务器补全真实进程身份，再通过辅助功能窗口检查确认目标。\n- 同步修复窗口监听、当前应用内切换、焦点记录和退出清理，避免恢复的窗口被误判为已退出并再次移除。\n- 身份无法唯一确认时不猜测进程；保留现有辅助窗口过滤规则。\n\n### 本地构建\n\n- Debug 构建统一使用与正式版相同的 Developer ID 身份，并在启动前校验签名，避免切换签名身份导致重新授权。\n- 新增项目构建与权限验证约束。\n\n### 下载\n\n`Napoleon-0.3.2.dmg` 支持 Apple Silicon 和 Intel，使用 Developer ID 签名并通过 Apple 公证，DMG 已附加公证票据。\n\n## English\n\n### Window switching fixes\n\n- Fixed missing windows from apps such as Device Hub when macOS reports an invalid application process ID. WindowServer supplies the actual owner PID, while Accessibility continues to validate switchable windows.\n- Updated window observation, current-app switching, focus tracking, and termination cleanup so recovered windows are not incorrectly removed as terminated.\n- Ambiguous identities are not guessed, and existing auxiliary-window filtering remains in place.\n\n### Local builds\n\n- Debug builds now use the same Developer ID identity as release builds, with signature checks before launch to avoid permission prompts caused by switching signing identities.\n- Added project rules for building and verifying permissions.\n\n### Download\n\n`Napoleon-0.3.2.dmg` is a universal Apple Silicon / Intel build, signed with Developer ID and notarized by Apple, with a stapled notarization ticket.\n"
+  },
+  {
+    "version": "0.3.1",
+    "date": "2026-08-20",
+    "url": "https://github.com/ryekee/Napoleon/releases/tag/v0.3.1",
+    "download": "https://github.com/ryekee/Napoleon/releases/download/v0.3.1/Napoleon-0.3.1.dmg",
+    "notes": "## 中文\n\nNapoleon 0.3.1 完成了正式分发迁移，也继续修复复杂窗口结构下的切换结果。\n\n### 发布与安装\n\n- 使用 Developer ID 签名并通过 Apple 公证，DMG 已附加公证票据，可直接通过 Gatekeeper 验证。\n- 发布包改为 DMG，打开后将 Napoleon 拖入 Applications 即可。\n- 本地 Debug 构建继续使用稳定的开发身份，正式 Release 使用独立的签名与公证流程。\n\n### 窗口切换\n\n- 引入统一的窗口注册表，合并 Accessibility 与系统窗口列表提供的信息，减少重复窗口与错误匹配。\n- 原生标签页会作为同一组窗口处理，附属表单和辅助窗口也能更准确地归入所属应用。\n- 使用 Accessibility 存活状态清理幽灵窗口，同时恢复此前可能遗漏的当前窗口。\n\n## English\n\nNapoleon 0.3.1 completes the move to a standard macOS distribution flow and continues improving window selection in complex app layouts.\n\n### Distribution\n\n- Signed with Developer ID and notarized by Apple. The DMG includes a stapled ticket and passes Gatekeeper validation.\n- Releases now use a drag-to-Applications DMG.\n- Local Debug builds keep their stable development identity, while official Release builds use a separate signing and notarization pipeline.\n\n### Window switching\n\n- Added a canonical window registry that combines Accessibility and system window data, reducing duplicates and incorrect matches.\n- Native tabs are grouped consistently, while attached sheets and utility windows are associated with the correct application more reliably.\n- Stale windows are removed using Accessibility liveness checks, and the current window is restored when an enumeration source omits it.\n"
+  }
+]

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <meta name="description" content="{{DESCRIPTION}}">
+  <meta name="theme-color" content="#fcf7ef">
+  <meta property="og:title" content="{{TITLE}}">
+  <meta property="og:description" content="{{DESCRIPTION}}">
+  <meta property="og:type" content="website">
+  {{SEO}}
+  <link rel="icon" href="{{ASSETS}}app-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="{{ASSETS}}app-icon.png">
+  <link rel="preload" href="{{ASSETS}}fonts/Inter.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="{{ASSETS}}style.css">
+  <script src="{{ASSETS}}site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">{{SKIP}}</a>
+  <header class="header">
+    <div class="nav-inner">
+      <a class="brand" href="{{HOME}}" aria-label="Napoleon"><img src="{{ASSETS}}app-icon.png" alt="" width="52" height="52"><span>Napoleon</span></a>
+      <nav class="nav-links" aria-label="{{NAV}}">
+        <a href="{{FAQ_URL}}" {{FAQ_CURRENT}}>{{ICON_FAQ}}<span>{{FAQS}}</span></a>
+        <a href="{{CHANGELOG_URL}}" {{CHANGELOG_CURRENT}}>{{ICON_CHANGELOG}}<span>{{CHANGELOG}}</span></a>
+      </nav>
+      <div class="nav-actions">
+        <details class="language-menu">
+          <summary aria-label="{{LANGUAGE}}">{{ICON_GLOBE}}<span>{{LANG_SHORT}}</span>{{ICON_CHEVRON}}</summary>
+          <nav aria-label="{{LANGUAGE}}">{{LANG_LINKS}}</nav>
+        </details>
+        <a class="button button-small" href="{{DOWNLOAD_URL}}">{{ICON_DOWNLOAD}}<span>{{DOWNLOAD}}</span></a>
+      </div>
+    </div>
+  </header>
+  <main id="main">{{BODY}}</main>
+  <footer class="footer wrap">
+    <div class="footer-top">
+      <div><a class="footer-brand" href="{{HOME}}">Napoleon</a><p>{{TAGLINE}}</p></div>
+      <nav aria-label="{{NAV}}"><a href="{{FAQ_URL}}">{{FAQS}}</a><a href="{{CHANGELOG_URL}}">{{CHANGELOG}}</a><a href="https://github.com/ryekee/Napoleon">GitHub</a></nav>
+    </div>
+    <p class="colophon">{{MADE}} <a href="https://github.com/ryekee/Napoleon/blob/main/LICENSE">{{LICENSE}}</a></p>
+    <div class="command-mark" aria-hidden="true"><span>⌘</span></div>
+  </footer>
+</body>
+</html>

@@ -45,3 +45,9 @@ version 必须与该 Release 的 `v<version>` tag 和 DMG 版本一致；更新�
 客户端读取 `https://github.com/ryekee/Napoleon/releases/latest/download/update.json`，不调用 REST API。
 清单返回 404 时，兼容历史 Release：以 HEAD 请求读取 `releases/latest` 最终跳转的正式版 tag。
 其他 HTTP 错误或清单损坏均明确报错，不误报“已是最新”。兼容路径不提供内嵌更新说明，用户仍可打开 Release 页面。
+
+## 官网
+
+先在草稿中上传 DMG 和更新清单。确认 Release Note（`## 中文` 和 `## English`）后，按现有方式用 GitHub 网页或本地 `gh` 发布正式版。[Deploy website](https://github.com/ryekee/Napoleon/actions/workflows/website.yml) 会读取正式 Release，更新五种语言的更新日志、首页版本和下载地址，检查通过后部署到 Cloudflare。草稿、预发布和单独推送 tag 不触发部署。
+
+修订已发布的说明后，可以在 Actions 手动重跑并勾选部署，无需重新发布 App。首次凭据配置和翻译规则见[官网维护说明](site/README.md#deploy)。

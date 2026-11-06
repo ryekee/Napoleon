@@ -1,0 +1,37 @@
+<section class="hero wrap" aria-labelledby="hero-title">
+  <h1 id="hero-title">{{HERO}}</h1>
+  <p class="hero-intro">{{INTRO}}<br> {{INTRO_MORE}}</p>
+  <div class="hero-actions"><a class="button" href="{{DOWNLOAD_URL}}">{{ICON_DOWNLOAD}}{{DOWNLOAD_MAC}}</a>{{FACTS}}</div>
+  <figure class="demo" aria-label="{{DEMO}}" aria-describedby="demo-help">
+    <div class="switcher">
+      <div class="switcher-toolbar" data-enhance hidden>
+        <label class="search-field">{{ICON_SEARCH}}<input id="window-search" type="search" placeholder="{{SEARCH}}" aria-label="{{SEARCH}}" autocomplete="off" spellcheck="false"></label>
+        <div class="segmented" role="group" aria-label="{{MODE}}"><button type="button" data-mode="windows" aria-pressed="true">{{WINDOWS}}</button><button type="button" data-mode="apps" aria-pressed="false">{{APPS}}</button></div>
+      </div>
+      <div class="window-grid" id="window-grid" role="listbox" aria-label="{{WINDOWS}}">{{WINDOW_CARDS}}</div>
+      <p class="demo-empty" hidden>{{EMPTY}}</p>
+    </div>
+    <figcaption>
+      <div><span>{{DEMO}}</span><span class="sr-only" id="demo-help">{{DEMO_HELP}}</span><span class="demo-status" id="demo-status" role="status" aria-live="polite"></span></div>
+      <div class="demo-controls" data-enhance hidden>
+        <button class="outline-button within-app" type="button" hidden>{{WITHIN}}</button>
+        <button class="outline-button previous-window" type="button" aria-label="{{PREVIOUS}}">{{ICON_LEFT}}</button>
+        <button class="outline-button next-window" type="button">{{ICON_RIGHT}}<span>{{NEXT}}</span></button>
+      </div>
+    </figcaption>
+  </figure>
+</section>
+<section class="features wrap" aria-labelledby="features-title">
+  <div class="section-intro"><h2 id="features-title">{{FEATURE_HEADING}}</h2><p>{{FEATURE_INTRO}}</p></div>
+  <div class="feature-grid">{{FEATURES}}</div>
+</section>
+<section class="download-section wrap" aria-labelledby="download-title">
+  <img class="download-icon" src="{{ASSETS}}app-icon.png" alt="" width="128" height="128" loading="lazy">
+  <h2 id="download-title">{{CLOSING}}</h2>
+  <p>{{CLOSING_INTRO}}</p>
+  <a class="button" href="{{DOWNLOAD_URL}}">{{ICON_DOWNLOAD}}{{DOWNLOAD_MAC}}</a>
+  {{FACTS}}
+  <a class="release-link" href="{{CHANGELOG_URL}}#v{{VERSION}}">v{{VERSION}}<span aria-hidden="true"> · </span>{{RELEASE_NOTES}}</a>
+</section>
+<script id="demo-copy" type="application/json">{{DEMO_JSON}}</script>
+<script src="{{ASSETS}}demo.js" defer></script>
