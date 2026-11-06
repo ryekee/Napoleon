@@ -62,16 +62,15 @@ final class OverlayPanel: NSPanel {
 
     /// 在鼠标所在屏居中显示浮层：定位鼠标屏 → 设 frame → 按该屏 backing scale 设
     /// `contentView.layer.contentsScale` → `orderFrontRegardless()` 显示但不激活 App。
-    func present(contentSize: CGSize) {
+    func present(contentSize: CGSize, topLeft: NSPoint? = nil) {
         let screen = Self.screenUnderMouse()
 
         setContentSize(contentSize)
         let visible = screen.visibleFrame
-        let origin = NSPoint(
+        setFrameTopLeftPoint(topLeft ?? NSPoint(
             x: visible.midX - contentSize.width / 2,
-            y: visible.midY - contentSize.height / 2
-        )
-        setFrameOrigin(origin)
+            y: visible.midY + contentSize.height / 2
+        ))
 
         contentView?.wantsLayer = true
         contentView?.layer?.contentsScale = screen.backingScaleFactor

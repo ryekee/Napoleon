@@ -83,6 +83,8 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// 每次会话新建一个实例（不像 `overlay` 跨会话复用）——`SwitcherView` 内部按 WindowID
     /// 复用的 `WindowCardLayer` 池只需要在同一次会话内维持缩略图淡入状态。
     private var switcherView: SwitcherView?
+    /// Keep the same grid cell under the pointer as closing windows shrinks the panel.
+    private var closeLayoutAnchor: NSPoint?
     /// 显示延迟到点前挂起的 `present()` 调用；下一次 trigger、字符输入触发的立即 present、
     /// 或者 commit/cancel 都会 `cancel()` 它，防止过期触发（重复 present 或在会话已经清空后
     /// 把面板重新弹出来）。
@@ -169,20 +171,11 @@ final class SwitcherController: HotkeyManagerDelegate {
             mode = .currentApp(NSWorkspace.shared.frontmostApplication?.windowOwnerPID ?? -1)
         }
 
-        let (state, hs, currentSpaceIsFullscreen) = windowStore.snapshot()
-        let mruOrdered = state.mru.ordered(state.windows)
-        // 全屏逃生：人所在 Space 本身是全屏时，`WindowFilter` 会放开跨 Space 过滤，让桌面窗口
-        // 重新进入列表（否则全屏 Space 只有那一扇全屏窗口，切换器无法切回桌面）——见 `WindowFilter`。
-        let filtered = WindowFilter.apply(
-            mruOrdered,
-            mode: mode,
-            scope: settings.scope,
-            currentSpaceIsFullscreen: currentSpaceIsFullscreen
-        )
-
+        windowStore.onWindowListChange = nil
+        closeLayoutAnchor = nil
+        let filtered = filteredSnapshot()
         baseFiltered = filtered
         ordered = filtered
-        handles = hs
         query = ""
         columns = 1
         shown = false
@@ -198,6 +191,43 @@ final class SwitcherController: HotkeyManagerDelegate {
         pendingShow = workItem
         let delay = Double(settings.showDelayMs) / 1000.0
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func filteredSnapshot(order: MRUTracker? = nil) -> [WindowInfo] {
+        let snapshot = windowStore.snapshot()
+        handles = snapshot.handles
+        return WindowFilter.apply(
+            (order ?? snapshot.state.mru).ordered(snapshot.state.windows),
+            mode: mode,
+            scope: settings.scope,
+            currentSpaceIsFullscreen: snapshot.currentSpaceIsFullscreen
+        )
+    }
+
+    private func refreshAfterClose() {
+        let previousIDs = baseFiltered.map(\.id)
+        let updated = filteredSnapshot(order: MRUTracker(order: previousIDs))
+        guard updated != baseFiltered else { return }
+
+        let previousItems = items
+        let selectedID = previousItems.indices.contains(selection.index) ? previousItems[selection.index].primary.id : nil
+        baseFiltered = updated
+        ordered = WindowFilter.search(updated, query: query, includePinyin: settings.pinyinSearchEnabled)
+        let refreshedItems = items
+        selection.setCount(refreshedItems.count)
+        if let selectedID,
+           let index = refreshedItems.firstIndex(where: { $0.windows.contains { $0.id == selectedID } }) {
+            selection.select(index)
+            if isApplicationGroupingActive {
+                groupPrimaryWindowIDs[refreshedItems[index].id] = selectedID
+            }
+        }
+        rerender()
+        let knownIDs = Set(previousIDs)
+        let added = updated.filter { !knownIDs.contains($0.id) }
+        if !added.isEmpty {
+            fetchThumbnails(for: added, token: sessionToken, captureSize: thumbnailCaptureSize(for: currentStyle()))
+        }
     }
 
     /// 显示延迟到点（或搜索提前触发）时真正显示面板：建 `SwitcherView`、接 hover/click、渲染、
@@ -222,6 +252,12 @@ final class SwitcherController: HotkeyManagerDelegate {
             self.selection.select(index)
             self.finishSession(focus: true)
         }
+        view.onClose = { [weak self, weak view] target in
+            guard let self, self.shown, self.switcherView === view else { return }
+            self.closeLayoutAnchor = NSPoint(x: self.overlay.frame.minX, y: self.overlay.frame.maxY)
+            self.windowStore.onWindowListChange = { [weak self] in self?.refreshAfterClose() }
+            Task { [windowStore = self.windowStore] in await windowStore.requestClose(target) }
+        }
         view.onToggleGrouping = { [weak self] in
             self?.toggleApplicationGrouping()
         }
@@ -240,6 +276,7 @@ final class SwitcherController: HotkeyManagerDelegate {
 
         overlay.setContentView(view)
         overlay.present(contentSize: size)
+        view.updateCloseButtonUnderPointer()
 
         fetchThumbnails(for: ordered, token: sessionToken, captureSize: thumbnailCaptureSize(for: style))
     }
@@ -260,7 +297,8 @@ final class SwitcherController: HotkeyManagerDelegate {
             thumbnailProvider: { [thumbnails] id in thumbnails.cached(id) }
         )
         columns = cols
-        overlay.present(contentSize: size)
+        overlay.present(contentSize: size, topLeft: closeLayoutAnchor)
+        view.updateCloseButtonUnderPointer()
     }
 
     private func handleStepForward() {
@@ -316,6 +354,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     }
 
     private func recomputeSearch() {
+        closeLayoutAnchor = nil
         // 拼音是否参与匹配现读设置——开关下一次按键即生效（见 `WindowFilter.search`）。
         let results = WindowFilter.search(baseFiltered, query: query, includePinyin: settings.pinyinSearchEnabled)
         recordSearch(query, results)
@@ -329,6 +368,7 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// 避免卡片数量改变时选中态跳到无关目标。
     private func toggleApplicationGrouping() {
         guard mode == .allWindows else { return }
+        closeLayoutAnchor = nil
         let selectedWindowID: WindowID? = items.indices.contains(selection.index)
             ? items[selection.index].primary.id
             : nil
@@ -404,6 +444,8 @@ final class SwitcherController: HotkeyManagerDelegate {
     /// 并让 `sessionToken` 前进一格，使这次会话里还在飞行的 `fetchThumbnails` 异步回调全部
     /// 过期（见该属性文档）。
     private func resetSessionState() {
+        windowStore.onWindowListChange = nil
+        closeLayoutAnchor = nil
         sessionToken += 1
         mode = .allWindows
         baseFiltered = []

@@ -100,6 +100,8 @@ final class WindowCardLayer: CALayer {
 
     private func setUp() {
         isGeometryFlipped = true
+        // Move the preview with its hit region when the next window fills a vacated cell.
+        actions = ["position": NSNull(), "bounds": NSNull()]
         masksToBounds = false // selection glow (`shadowOpacity`) must be free to bleed outside bounds
         cornerRadius = SwitcherMetrics.cardCornerRadius
         backgroundColor = nil

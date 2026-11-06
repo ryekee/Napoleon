@@ -29,13 +29,15 @@ final class WindowStore {
         element: AXUIElement
     )
 
-    private struct HandleProbe: @unchecked Sendable {
+    private struct WindowHandle: @unchecked Sendable {
         let id: WindowID
         let pid: ProcessID
         let element: AXUIElement
     }
 
     private var registry: CanonicalWindowRegistry
+    var onWindowListChange: (() -> Void)?
+    private var closeRequestsInFlight: Set<WindowCloseTarget> = []
     private(set) var currentSpaceIsFullscreen = false
 
     private let enumerator: WindowEnumerator
@@ -171,11 +173,53 @@ final class WindowStore {
         scheduleAudit()
     }
 
+    /// Use the complete registry so a search, minimization or Space filter cannot truncate an app group.
+    func requestClose(_ target: WindowCloseTarget) async {
+        guard closeRequestsInFlight.insert(target).inserted else { return }
+        defer { closeRequestsInFlight.remove(target) }
+        let windows = registry.allWindows.filter(target.includes)
+        var external: [WindowHandle] = []
+        var requested = 0
+        for window in windows {
+            if window.pid == NSRunningApplication.ownProcessID {
+                guard let local = NSApp.window(withWindowNumber: Int(window.id)),
+                      local.standardWindowButton(.closeButton)?.isEnabled == true else { continue }
+                local.performClose(nil)
+                requested += 1
+            } else if let element = handles[window.id] {
+                external.append(WindowHandle(id: window.id, pid: window.pid, element: element))
+            }
+        }
+        requested += await Self.pressCloseButtons(external, resolver: resolver)
+        if requested < windows.count || windows.isEmpty {
+            Self.logger.notice("close requests delivered: \(requested)/\(windows.count)")
+            NSSound.beep()
+        }
+        // AXPress can open a save sheet. Only destruction events or an audit can remove a window.
+        requestRefresh()
+    }
+
+    private nonisolated static func pressCloseButtons(_ windows: [WindowHandle], resolver: WindowIDResolver) async -> Int {
+        var requested = 0
+        for window in windows {
+            var value: CFTypeRef?
+            guard resolver.windowID(for: window.element) == window.id,
+                  AXUIElementCopyAttributeValue(window.element, kAXCloseButtonAttribute as CFString, &value) == .success,
+                  let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
+            let button = value as! AXUIElement // CF type checked above
+            if AXUIElementPerformAction(button, kAXPressAction as CFString) == .success {
+                requested += 1
+            }
+        }
+        return requested
+    }
+
     func forget(windowID id: WindowID) {
         guard registry.window(id) != nil || handles[id] != nil else { return }
         if let pid = registry.window(id)?.pid { advanceMembership(pid) }
         registry.remove(id)
         removeHandle(id)
+        onWindowListChange?()
     }
 
     /// 精确窗口聚焦已经成功时立即提交 MRU，不依赖稍后是否送达 App 激活通知。
@@ -241,9 +285,9 @@ final class WindowStore {
         let knownWindows = Dictionary(
             uniqueKeysWithValues: registry.allWindows.map { ($0.id, $0.pid) }
         )
-        let handleProbes = handles.compactMap { id, element -> HandleProbe? in
+        let handleProbes = handles.compactMap { id, element -> WindowHandle? in
             guard let pid = knownWindows[id] else { return nil }
-            return HandleProbe(id: id, pid: pid, element: element)
+            return WindowHandle(id: id, pid: pid, element: element)
         }
         async let axTask = enumerator.enumerateAll()
         async let contentTask = Self.fetchShareableContent()
@@ -324,6 +368,7 @@ final class WindowStore {
            let pid = frontmost.windowOwnerPID {
             _ = repairFocusedWindow(pid: pid, app: frontmost)
         }
+        onWindowListChange?()
     }
 
     private func apply(
@@ -493,7 +538,7 @@ final class WindowStore {
     }
 
     private nonisolated static func probeWindowLiveness(
-        _ probes: [HandleProbe]
+        _ probes: [WindowHandle]
     ) async -> [WindowID: WindowHandleLiveness] {
         await withTaskGroup(of: (WindowID, WindowHandleLiveness).self) { group in
             for probe in probes {
@@ -534,6 +579,7 @@ final class WindowStore {
         case .windowCreated(let pid, let element):
             advanceMembership(pid)
             handleWindowCreated(pid: pid, element: element)
+            onWindowListChange?()
 
         case .windowDestroyed(let pid, let element):
             advanceMembership(pid)
@@ -591,6 +637,7 @@ final class WindowStore {
         }
         registry.remove(id)
         removeHandle(id)
+        onWindowListChange?()
     }
 
     private func reduceFocusChange(to id: WindowID) {
@@ -695,6 +742,7 @@ final class WindowStore {
         registry.terminateApp(pid: pid)
         removeSuppressedWindows(pid: pid)
         trimMappingsToRegistry()
+        onWindowListChange?()
     }
 
     // MARK: - Identity and handle maps

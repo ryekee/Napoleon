@@ -40,6 +40,35 @@ import Testing
         #expect(SwitcherItem.make(from: windows, groupByApplication: true).map(\.windows.count) == [2, 1])
     }
 
+    @Test func closeOnAWindowRequiresBothWindowIDAndOwner() {
+        let clicked = window(id: 1, pid: 10, bundleID: "a")
+        let target = WindowCloseTarget(clicked, grouped: false)
+        #expect(target.includes(clicked))
+        #expect(!target.includes(window(id: 2, pid: 10, bundleID: "a")))
+        #expect(!target.includes(window(id: 1, pid: 11, bundleID: "a")))
+    }
+
+    @Test func closingASearchedGroupIncludesWindowsOutsideTheResults() {
+        var minimized = window(id: 3, pid: 11, bundleID: "a")
+        minimized.isMinimized = true
+        let all = [
+            window(id: 1, pid: 10, bundleID: "a", title: "Match"),
+            window(id: 2, pid: 20, bundleID: "b", title: "Match"),
+            minimized
+        ]
+        let visible = WindowFilter.apply(all, mode: .allWindows, scope: .init())
+        let results = WindowFilter.search(visible, query: "Match")
+        let first = SwitcherItem.make(from: results, groupByApplication: true)[0]
+        let target = WindowCloseTarget(first.primary, grouped: true)
+        #expect(all.filter(target.includes).map(\.id) == [1, 3])
+    }
+
+    @Test func closingAnUnbundledGroupMatchesOnlyItsPID() {
+        let target = WindowCloseTarget(window(id: 1, pid: 10, bundleID: nil), grouped: true)
+        #expect(target.includes(window(id: 2, pid: 10, bundleID: "")))
+        #expect(!target.includes(window(id: 3, pid: 20, bundleID: nil)))
+    }
+
     @Test func cyclingPrimaryKeepsStableCardIdentityAndWraps() {
         let item = SwitcherItem([
             window(id: 1, pid: 10, bundleID: "a", title: "One"),

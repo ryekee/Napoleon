@@ -56,6 +56,35 @@ enum SwitcherMetrics {
 
 }
 
+enum SwitcherApplicationKey: Hashable {
+    case bundleID(String)
+    case pid(ProcessID)
+
+    init(_ window: WindowInfo) {
+        if let bundleID = window.appBundleID, !bundleID.isEmpty {
+            self = .bundleID(bundleID)
+        } else {
+            self = .pid(window.pid)
+        }
+    }
+}
+
+enum WindowCloseTarget: Hashable {
+    case window(WindowID, ProcessID)
+    case application(SwitcherApplicationKey)
+
+    init(_ window: WindowInfo, grouped: Bool) {
+        self = grouped ? .application(SwitcherApplicationKey(window)) : .window(window.id, window.pid)
+    }
+
+    func includes(_ window: WindowInfo) -> Bool {
+        switch self {
+        case let .window(id, pid): window.id == id && window.pid == pid
+        case let .application(key): SwitcherApplicationKey(window) == key
+        }
+    }
+}
+
 /// Switcher 的展示单位：逐窗口模式下每项只有一扇窗口；按 App 聚合时同一 App 的窗口按原 MRU
 /// 顺序放在同一项，第一扇是聚焦目标和正面缩略图，其余窗口用于堆叠预览。
 struct SwitcherItem: Equatable {
@@ -93,14 +122,9 @@ struct SwitcherItem: Equatable {
         guard groupByApplication else { return windows.map { SwitcherItem([$0]) } }
 
         var groups: [[WindowInfo]] = []
-        var indices: [ApplicationKey: Int] = [:]
+        var indices: [SwitcherApplicationKey: Int] = [:]
         for window in windows {
-            let key: ApplicationKey
-            if let bundleID = window.appBundleID, !bundleID.isEmpty {
-                key = .bundleID(bundleID)
-            } else {
-                key = .pid(window.pid)
-            }
+            let key = SwitcherApplicationKey(window)
 
             if let index = indices[key] {
                 groups[index].append(window)
@@ -112,10 +136,6 @@ struct SwitcherItem: Equatable {
         return groups.map { SwitcherItem($0) }
     }
 
-    private enum ApplicationKey: Hashable {
-        case bundleID(String)
-        case pid(ProcessID)
-    }
 }
 
 /// Task 21：`SwitcherMetrics` 里**随用户设置变化**的那部分——缩略图尺寸档位（`CardSizeOption`）、
@@ -250,7 +270,11 @@ private final class SwitcherPassthroughGlassContainerView: NSGlassEffectContaine
 
 /// 真正的 NSButton（而不是只画一层图标），保留 tooltip / 可访问性；允许非激活 panel 的第一次
 /// 点击直接触发，行为与卡片的 `acceptsFirstMouse` 一致。
-private final class SwitcherGroupingButton: NSButton {
+private class SwitcherButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class SwitcherGroupingButton: SwitcherButton {
     enum InteractionState {
         case idle
         case hovered
@@ -270,8 +294,6 @@ private final class SwitcherGroupingButton: NSButton {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -330,6 +352,7 @@ final class SwitcherView: NSView {
     /// Fires on `mouseUp` inside a card, same index convention as `onHover`. Task 19 wires this
     /// to commit (focus that window).
     var onClick: ((Int) -> Void)?
+    var onClose: ((WindowCloseTarget) -> Void)?
     /// Fires when the top-right quick toggle is clicked.
     var onToggleGrouping: (() -> Void)?
 
@@ -355,7 +378,14 @@ final class SwitcherView: NSView {
     /// Index-aligned with the `items` array from the most recent `render(...)` call. Hit
     /// testing (`cardIndex(at:)`) is a linear scan over this — fine at switcher-grid scale
     /// (single-digit to low-double-digit window counts).
-    private var cardFrames: [CGRect] = []
+    private struct CardHitRegion {
+        let frame: CGRect
+        let closeTarget: WindowCloseTarget
+        let name: String
+    }
+    private var cardRegions: [CardHitRegion] = []
+    private var closeButton: SwitcherButton?
+    private var closeTarget: WindowCloseTarget?
     private var trackingArea: NSTrackingArea?
     private var lastHoverIndex: Int?
     private var groupingButtonInteractionState = SwitcherGroupingButton.InteractionState.idle
@@ -559,8 +589,7 @@ final class SwitcherView: NSView {
             showsGroupingToggle: showsGroupingToggle
         )
 
-        var frames: [CGRect] = []
-        frames.reserveCapacity(items.count)
+        cardRegions.removeAll(keepingCapacity: true)
         var usedIDs = Set<WindowID>()
         let columns = max(layout.columns, 1) // guard divide-by-zero; unreachable when items is non-empty (see computeLayout)
 
@@ -574,7 +603,6 @@ final class SwitcherView: NSView {
                     + SwitcherMetrics.headerGridSpacing + CGFloat(row) * style.cardStride.height
             )
             let cardFrame = CGRect(origin: origin, size: style.cardSize)
-            frames.append(cardFrame)
             usedIDs.insert(window.id)
 
             let card = cardLayers[window.id] ?? {
@@ -594,10 +622,14 @@ final class SwitcherView: NSView {
                 groupCount: item.windows.count,
                 contentsScale: screen.backingScaleFactor
             )
+            cardRegions.append(CardHitRegion(
+                frame: cardFrame,
+                closeTarget: WindowCloseTarget(window, grouped: groupingByApplication),
+                name: groupingByApplication || window.title.isEmpty ? window.appName : window.title
+            ))
         }
 
-        cardFrames = frames
-        updateSelectionSurface(selected: selected, frames: frames)
+        updateSelectionSurface(selected: selected)
 
         // Drop cards for windows that fell out of the list (closed, or simply not part of this
         // render) — collect ids first, since mutating `cardLayers` while iterating its own `keys`
@@ -731,13 +763,13 @@ final class SwitcherView: NSView {
         CATransaction.commit()
     }
 
-    private func updateSelectionSurface(selected: Int, frames: [CGRect]) {
-        guard frames.indices.contains(selected) else {
+    private func updateSelectionSurface(selected: Int) {
+        guard cardRegions.indices.contains(selected) else {
             selectionSurface?.isHidden = true
             selectionOutlineLayer.isHidden = true
             return
         }
-        let frame = frames[selected].insetBy(
+        let frame = cardRegions[selected].frame.insetBy(
             dx: -SwitcherMetrics.selectionExpansion,
             dy: -SwitcherMetrics.selectionExpansion
         )
@@ -829,7 +861,10 @@ final class SwitcherView: NSView {
 
     override func mouseEntered(with event: NSEvent) { handleHover(event) }
     override func mouseMoved(with event: NSEvent) { handleHover(event) }
-    override func mouseExited(with event: NSEvent) { lastHoverIndex = nil }
+    override func mouseExited(with event: NSEvent) {
+        lastHoverIndex = nil
+        updateCloseButton(for: nil)
+    }
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -839,6 +874,9 @@ final class SwitcherView: NSView {
     }
 
     private func handleHover(_ event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let index = cardIndex(at: point)
+        updateCloseButton(for: index)
         // 忽略「静止光标」：浮层弹出时如果光标恰好停在某张卡上，mouseEntered 会立刻触发一次
         // hover 把那张卡高亮，盖掉键盘的默认选中（上一个窗口）。记录本会话首次收到 hover 时的
         // 全局鼠标位置为基准，在鼠标真正移动（超过阈值）之前一律不响应 hover；一旦移动过就
@@ -853,8 +891,7 @@ final class SwitcherView: NSView {
                 return
             }
         }
-        let point = convert(event.locationInWindow, from: nil)
-        guard let index = cardIndex(at: point) else {
+        guard let index else {
             lastHoverIndex = nil
             return
         }
@@ -864,7 +901,53 @@ final class SwitcherView: NSView {
     }
 
     private func cardIndex(at point: CGPoint) -> Int? {
-        cardFrames.firstIndex { $0.contains(point) }
+        cardRegions.firstIndex { $0.frame.contains(point) }
+    }
+
+    /// Searching or regrouping can move the panel beneath a stationary pointer.
+    func updateCloseButtonUnderPointer() {
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        updateCloseButton(for: cardIndex(at: point))
+    }
+
+    private func updateCloseButton(for index: Int?) {
+        let region = index.map { cardRegions[$0] }
+        if closeTarget != region?.closeTarget {
+            closeButton?.removeFromSuperview()
+            closeButton = nil
+            closeTarget = region?.closeTarget
+        }
+        guard let region else { return }
+        if closeButton == nil {
+            let label: String
+            switch region.closeTarget {
+            case .window:
+                label = String(format: String(localized: "Close window “%@”"), region.name)
+            case .application:
+                label = String(format: String(localized: "Close all windows of %@"), region.name)
+            }
+            let button = SwitcherButton(frame: .zero)
+            button.isBordered = false
+            button.refusesFirstResponder = true
+            button.imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
+            button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+                .applying(.init(paletteColors: [.black, .systemRed]))
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+            button.target = self
+            button.action = #selector(closeHoveredWindow(_:))
+            addSubview(button)
+            closeButton = button
+        }
+        closeButton?.frame = CGRect(origin: region.frame.origin, size: CGSize(width: 24, height: 24))
+    }
+
+    @objc private func closeHoveredWindow(_ sender: NSButton) {
+        // A search or grouping change during a press can replace the button under the pointer.
+        guard sender === closeButton, let closeTarget else { return }
+        onClose?(closeTarget)
     }
 
     // MARK: - Mouse-screen detection

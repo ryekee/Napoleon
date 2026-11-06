@@ -20,7 +20,7 @@ without showing the overlay.
 3. Launch Napoleon and grant **Accessibility** access in System Settings → Privacy & Security.
 4. Enable **Screen Recording** if you want window previews. Without it, Napoleon uses app icons.
 
-Requires **macOS 14 Sonoma or later**. The current release, **0.3.3**, supports Apple Silicon
+Requires **macOS 14 Sonoma or later**. The release DMG supports Apple Silicon
 and Intel, uses Developer ID signing, and is notarized by Apple.
 
 ## Switch, group, and search
@@ -32,6 +32,7 @@ and Intel, uses Developer ID signing, and is notarized by Apple.
 | Move through the switcher | Tab / ⇧Tab or arrow keys |
 | Filter windows | Type an app name or window title |
 | Activate a window | Release the shortcut modifier, or click a card |
+| Close a window | Hover over its card and click × in the upper-left corner |
 | Cancel | Esc |
 
 Both switching shortcuts are configurable in Settings.
@@ -39,7 +40,8 @@ Both switching shortcuts are configurable in Settings.
 - **Window previews.** See the contents of each window, with app icons as a fallback
   when a preview is unavailable.
 - **Optional app grouping.** Keep windows separate or group them by app. In grouped mode,
-  use the current-app shortcut to cycle through the selected app's windows.
+  use the current-app shortcut to cycle through the selected app's windows. Clicking ×
+  closes all windows Napoleon recognizes for that app, including those filtered out by search.
 - **Quick switching.** Release before the display delay to switch without flashing the
   overlay. The default delay is 100 ms and can be adjusted.
 - **Pinyin search.** Match Chinese app names and window titles by Pinyin, such as
